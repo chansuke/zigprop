@@ -3,12 +3,13 @@
 
 const std = @import("std");
 const zigprop = @import("zigprop");
-const Source = zigprop.Source;
+const Source = zigprop.internal.Source;
+const GenState = zigprop.internal.GenState;
 const Choice = zigprop.Choice;
 const GenContext = zigprop.GenContext;
 
-fn randomCtx(src: *Source) GenContext {
-    return .{ .src = src, .allocator = std.testing.allocator, .limits = .{} };
+fn randomCtx(state: *GenState, src: *Source) GenContext {
+    return zigprop.internal.genContextForTest(state, src, std.testing.allocator, .{});
 }
 
 fn zeroChoices(n: usize) [256]Choice {
@@ -23,12 +24,14 @@ test "all-zero draws generate zero values (design §4.1 invariant)" {
     inline for (.{ u8, u32, u64, i8, i32, i64, u1, i1 }) |T| {
         var src = Source.initReplay(std.testing.allocator, &zeros, 1000);
         defer src.deinit();
-        var ctx = randomCtx(&src);
+        var ctx_state: GenState = undefined;
+        var ctx = randomCtx(&ctx_state, &src);
         try std.testing.expectEqual(@as(T, 0), try zigprop.generate(T, &ctx));
     }
     var src = Source.initReplay(std.testing.allocator, &zeros, 1000);
     defer src.deinit();
-    var ctx = randomCtx(&src);
+    var ctx_state: GenState = undefined;
+    var ctx = randomCtx(&ctx_state, &src);
     try std.testing.expectEqual(false, try zigprop.generate(bool, &ctx));
     try std.testing.expectEqual(null, try zigprop.generate(?u32, &ctx));
     const s = try zigprop.generate([]const u8, &ctx);
@@ -36,9 +39,10 @@ test "all-zero draws generate zero values (design §4.1 invariant)" {
 }
 
 test "no-draw generation: u0, empty struct, empty array" {
-    var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(5, 0), 100);
+    var src = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(5, 0), 100);
     defer src.deinit();
-    var ctx = randomCtx(&src);
+    var ctx_state: GenState = undefined;
+    var ctx = randomCtx(&ctx_state, &src);
     try std.testing.expectEqual(@as(u0, 0), try zigprop.generate(u0, &ctx));
     _ = try zigprop.generate(struct {}, &ctx);
     _ = try zigprop.generate([0]u8, &ctx);
@@ -48,9 +52,10 @@ test "no-draw generation: u0, empty struct, empty array" {
 test "i8 generation reaches the boundary values" {
     var seen: std.bit_set.IntegerBitSet(256) = .empty;
     for (0..300) |attempt| {
-        var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(11, @intCast(attempt)), 1000);
+        var src = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(11, @intCast(attempt)), 1000);
         defer src.deinit();
-        var ctx = randomCtx(&src);
+        var ctx_state: GenState = undefined;
+        var ctx = randomCtx(&ctx_state, &src);
         const v = try zigprop.generate(i8, &ctx);
         seen.set(@intCast(@as(i16, v) + 128));
     }
@@ -65,9 +70,10 @@ test "enum with explicit values generates only named fields, all reachable" {
     var seen_b = false;
     var seen_c = false;
     for (0..200) |attempt| {
-        var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(3, @intCast(attempt)), 100);
+        var src = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(3, @intCast(attempt)), 100);
         defer src.deinit();
-        var ctx = randomCtx(&src);
+        var ctx_state: GenState = undefined;
+        var ctx = randomCtx(&ctx_state, &src);
         switch (try zigprop.generate(E, &ctx)) {
             .a => seen_a = true,
             .b => seen_b = true,
@@ -79,24 +85,27 @@ test "enum with explicit values generates only named fields, all reachable" {
 
 test "struct with a comptime field keeps the comptime value" {
     const S = struct { comptime tag: u32 = 99, x: u32 };
-    var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(3, 0), 100);
+    var src = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(3, 0), 100);
     defer src.deinit();
-    var ctx = randomCtx(&src);
+    var ctx_state: GenState = undefined;
+    var ctx = randomCtx(&ctx_state, &src);
     const v = try zigprop.generate(S, &ctx);
     try std.testing.expectEqual(@as(u32, 99), v.tag);
 }
 
 test "composite generation is deterministic and replays faithfully" {
     const S = struct { a: u32, b: ?i16, c: []const u8 };
-    var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(77, 2), 100_000);
+    var src = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(77, 2), 100_000);
     defer src.deinit();
-    var ctx = randomCtx(&src);
+    var ctx_state: GenState = undefined;
+    var ctx = randomCtx(&ctx_state, &src);
     const v1 = try zigprop.generate(S, &ctx);
     defer std.testing.allocator.free(v1.c);
 
     var rep = Source.initReplay(std.testing.allocator, src.recorded.items, 100_000);
     defer rep.deinit();
-    var rctx = randomCtx(&rep);
+    var rctx_state: GenState = undefined;
+    var rctx = randomCtx(&rctx_state, &rep);
     const v2 = try zigprop.generate(S, &rctx);
     defer std.testing.allocator.free(v2.c);
     try std.testing.expectEqual(v1.a, v2.a);
@@ -107,9 +116,10 @@ test "composite generation is deterministic and replays faithfully" {
 
 test "slice lengths respect max_len" {
     for (0..200) |attempt| {
-        var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(8, @intCast(attempt)), 100_000);
+        var src = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(8, @intCast(attempt)), 100_000);
         defer src.deinit();
-        var ctx = randomCtx(&src);
+        var ctx_state: GenState = undefined;
+        var ctx = randomCtx(&ctx_state, &src);
         const s = try zigprop.generate([]const u32, &ctx);
         defer std.testing.allocator.free(s);
         try std.testing.expect(s.len <= 32);
@@ -123,7 +133,8 @@ test "element budget turns nested expansion into InvalidGeneration" {
     for (&choices) |*c| c.* = .{ .bound = 0, .value = 32 };
     var src = Source.initReplay(std.testing.allocator, &choices, 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{ .max_total_elements = 4 } };
+    var ctx_state: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{ .max_total_elements = 4 });
     try std.testing.expectError(error.InvalidGeneration, zigprop.generate([]const []const u8, &ctx));
 }
 
@@ -165,14 +176,16 @@ test "runner: a failure is confirmed, snapshotted and replayable" {
             // value.
             var rep = Source.initReplay(std.testing.allocator, f.choices, 100_000);
             defer rep.deinit();
-            var ctx = randomCtx(&rep);
+            var ctx_state: GenState = undefined;
+            var ctx = randomCtx(&ctx_state, &rep);
             const v = try zigprop.generate(u32, &ctx);
             try std.testing.expect(!smallOnly(v));
             try std.testing.expectEqualSlices(Choice, f.choices, rep.recorded.items);
             // The shrunk sequence also regenerates a failing value.
             var rep2 = Source.initReplay(std.testing.allocator, f.shrunk_choices, 100_000);
             defer rep2.deinit();
-            var ctx2 = randomCtx(&rep2);
+            var ctx2_state: GenState = undefined;
+            var ctx2 = randomCtx(&ctx2_state, &rep2);
             const v2 = try zigprop.generate(u32, &ctx2);
             try std.testing.expect(!smallOnly(v2));
         },
@@ -205,7 +218,7 @@ test "runner: a generator that always discards gives up" {
 
 fn singleDraw(ctx: *GenContext) anyerror!u32 {
     // The dedicated single-choice encoding of design §8.
-    return @intCast(ctx.src.range(1 << 32));
+    return @intCast(ctx.range(1 << 32));
 }
 
 test "runner: checkCustom with the single-draw encoding finds x >= 10" {

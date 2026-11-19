@@ -4,13 +4,13 @@
 
 const std = @import("std");
 const zigprop = @import("zigprop");
-const Source = zigprop.Source;
+const Source = zigprop.internal.Source;
 const Choice = zigprop.Choice;
 
 const bounds = [_]u64{ 1, 2, 3, 7, 1000, 1 << 63, 0 }; // 0 = full-domain sentinel
 
 test "range validity: every recorded choice satisfies bound == 0 or value < bound" {
-    var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(42, 0), 100_000);
+    var src = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(42, 0), 100_000);
     defer src.deinit();
     for (0..1000) |i| {
         const bound = bounds[i % bounds.len];
@@ -25,9 +25,9 @@ test "range validity: every recorded choice satisfies bound == 0 or value < boun
 }
 
 test "determinism: same derived seed reproduces the same choice sequence" {
-    var a = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(42, 3), 100_000);
+    var a = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(42, 3), 100_000);
     defer a.deinit();
-    var b = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(42, 3), 100_000);
+    var b = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(42, 3), 100_000);
     defer b.deinit();
     for (0..500) |i| {
         const bound = bounds[i % bounds.len];
@@ -37,9 +37,9 @@ test "determinism: same derived seed reproduces the same choice sequence" {
 }
 
 test "different attempts diverge" {
-    var a = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(42, 0), 100_000);
+    var a = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(42, 0), 100_000);
     defer a.deinit();
-    var b = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(42, 1), 100_000);
+    var b = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(42, 1), 100_000);
     defer b.deinit();
     for (0..100) |i| {
         const bound = bounds[i % bounds.len];
@@ -54,7 +54,7 @@ test "different attempts diverge" {
 }
 
 test "replay fidelity: replaying the recorded sequence regenerates the same values" {
-    var gen = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(9, 5), 100_000);
+    var gen = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(9, 5), 100_000);
     defer gen.deinit();
     var values: [300]u64 = undefined;
     for (0..300) |i| {
@@ -114,7 +114,7 @@ test "replay ignores an unconsumed surplus suffix" {
 }
 
 test "boolean draws are recorded as range(2)" {
-    var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(3, 0), 100);
+    var src = Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(3, 0), 100);
     defer src.deinit();
     for (0..50) |_| _ = src.boolean();
     for (src.recorded.items) |c| {
