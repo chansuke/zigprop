@@ -23,64 +23,108 @@ pub fn countElement(ctx: *GenContext) error{InvalidGeneration}!void {
 }
 
 /// Comptime unfolding cap for recursive types (design v0.2 §3.2,
-/// MF1): a type may appear at most this many times among the
-/// ancestors of a generation point. The specialization at the cap
-/// generates the cut form and contains no further recursive calls,
-/// which is what makes compilation of recursive types terminate —
-/// a runtime check alone cannot do that. `Limits.max_depth` must
-/// not exceed this value.
+/// MF1): a generation path may take at most this many recursive
+/// occurrences (re-entries of a container type already entered on
+/// the path). The specialization at the cap generates the cut form
+/// and contains no further recursive calls, which is what makes
+/// compilation of recursive types terminate — a runtime check
+/// alone cannot do that. `Limits.max_depth` must not exceed this
+/// value.
+///
+/// Termination: the comptime unfolding state is (set, n), where the
+/// set holds the container types entered on the current path and n
+/// counts the recursive occurrences the path has taken. Along any
+/// path the set grows only by first entries (bounded by the number
+/// of distinct container types reachable from the root) and n only
+/// by re-entries (bounded by this cap); scalars and channel types
+/// leave the state unchanged, and chains of channels alone cannot
+/// cycle in a legal type graph. Hence the space of (type, set, n)
+/// instantiations is finite, and two paths that reach the same type
+/// with the same set and count share one instantiation, whatever
+/// route and order they took to get there.
 pub const max_depth_cap: usize = 16;
 
 pub fn generate(comptime T: type, ctx: *GenContext) !T {
-    return generateRec(T, ctx, .{});
+    return generateRec(T, ctx, @Tuple(&.{}), 0);
 }
 
-fn countOccurrences(comptime T: type, comptime ancestors: anytype) usize {
-    var n: usize = 0;
-    inline for (ancestors) |a| {
-        if (a == T) n += 1;
+// ---------------------------------------------------------------------
+// Canonical comptime unfolding state (design v0.2 §3.2).
+//
+// The set of container types entered on the current path is a tuple
+// type whose field types are the members, deduplicated and sorted by
+// @typeName. Tuple types are interned structurally, so equal sets
+// are the same type regardless of the order in which they were
+// built, and generic instantiations keyed on them are shared. (If
+// two distinct types ever shared a @typeName, their relative order
+// would depend on insertion order: canonicality — and with it
+// instantiation sharing — would degrade, but membership still uses
+// `==`, so correctness would not.)
+// ---------------------------------------------------------------------
+
+fn setHas(comptime Set: type, comptime T: type) bool {
+    inline for (@typeInfo(Set).@"struct".field_types) |S| {
+        if (S == T) return true;
     }
-    return n;
+    return false;
+}
+
+fn setInsertSorted(comptime Set: type, comptime T: type) type {
+    const old = @typeInfo(Set).@"struct".field_types;
+    var out: [old.len + 1]type = undefined;
+    var i: usize = 0;
+    var inserted = false;
+    for (old) |S| {
+        if (!inserted and std.mem.order(u8, @typeName(T), @typeName(S)) == .lt) {
+            out[i] = T;
+            i += 1;
+            inserted = true;
+        }
+        out[i] = S;
+        i += 1;
+    }
+    if (!inserted) out[i] = T;
+    const final = out;
+    return @Tuple(&final);
 }
 
 /// A recursive occurrence is the re-entry of a named container
-/// type (struct or union) already present among the ancestors.
+/// type (struct or union) already entered on the current path.
 /// The channels that mediate recursion in legal Zig types —
 /// slices, optionals, arrays — also repeat along a cycle, but
 /// they are not occurrences: counting them would cut a recursive
-/// value's own kids slice the moment depth is spent (the element
-/// type's slice is already an ancestor). Every cycle in a legal
-/// type graph passes through a struct or union (a cycle through
-/// channels alone would be infinitely sized), so gating on
+/// value's own kids slice the moment depth is spent. Every cycle
+/// in a legal type graph passes through a struct or union (a cycle
+/// through channels alone would be infinitely sized), so gating on
 /// containers loses no recursion.
-fn isRecursiveOccurrence(comptime T: type, comptime ancestors: anytype) bool {
-    return switch (@typeInfo(T)) {
-        .@"struct", .@"union" => countOccurrences(T, ancestors) > 0,
-        else => false,
-    };
-}
-
-fn atUnfoldingCap(comptime T: type, comptime ancestors: anytype) bool {
-    return switch (@typeInfo(T)) {
-        .@"struct", .@"union" => countOccurrences(T, ancestors) >= max_depth_cap,
-        else => false,
-    };
-}
-
-fn generateRec(comptime T: type, ctx: *GenContext, comptime ancestors: anytype) !T {
-    if (comptime atUnfoldingCap(T, ancestors)) {
-        return generateCut(T, ctx);
-    } else {
-        return generateNormal(T, ctx, ancestors);
+fn generateRec(comptime T: type, ctx: *GenContext, comptime Set: type, comptime n: usize) !T {
+    switch (@typeInfo(T)) {
+        .@"struct", .@"union" => {
+            if (comptime setHas(Set, T)) {
+                // n mirrors the runtime ctx.depth (one level per
+                // occurrence on the path); since max_depth <= cap is
+                // validated, the comptime cut at n = cap coincides
+                // with the runtime cut for every legal config.
+                if (comptime n >= max_depth_cap) {
+                    return generateCut(T, ctx);
+                } else {
+                    return generateNormal(T, ctx, true, Set, n + 1);
+                }
+            } else {
+                return generateNormal(T, ctx, false, setInsertSorted(Set, T), n);
+            }
+        },
+        else => return generateNormal(T, ctx, false, Set, n),
     }
 }
 
-fn generateNormal(comptime T: type, ctx: *GenContext, comptime ancestors: anytype) !T {
+/// `Set` and `n` are the state T's children are generated with,
+/// already updated for T itself.
+fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: bool, comptime Set: type, comptime n: usize) !T {
     // A recursive occurrence spends one level of the runtime depth
     // budget (design v0.2 §3.4, MF5). The restore is deferred at
     // function scope — a defer inside the if block would run when
     // the block closes, before any field is generated.
-    const is_recursive = comptime isRecursiveOccurrence(T, ancestors);
     if (is_recursive) {
         if (ctx.depth >= ctx.limits.max_depth) {
             return generateCut(T, ctx);
@@ -90,16 +134,15 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime ancestors: anytyp
     defer if (is_recursive) {
         ctx.depth -= 1;
     };
-    const child_ancestors = ancestors ++ .{T};
     switch (@typeInfo(T)) {
         .bool => return ctx.src.boolean(),
         .int => return generateInt(T, ctx),
         .float => return generateFloat(T, ctx),
-        .@"union" => return generateUnion(T, ctx, child_ancestors),
+        .@"union" => return generateUnion(T, ctx, Set, n),
         .@"enum" => return generateEnum(T, ctx),
         .optional => |opt| {
             if (ctx.src.boolean()) {
-                return try generateRec(opt.child, ctx, child_ancestors);
+                return try generateRec(opt.child, ctx, Set, n);
             }
             return null;
         },
@@ -107,7 +150,7 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime ancestors: anytyp
             var result: T = undefined;
             for (&result) |*elem| {
                 try countElement(ctx);
-                elem.* = try generateRec(arr.child, ctx, child_ancestors);
+                elem.* = try generateRec(arr.child, ctx, Set, n);
             }
             return result;
         },
@@ -128,7 +171,7 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime ancestors: anytyp
             errdefer ctx.allocator.free(buf);
             for (buf) |*elem| {
                 try countElement(ctx);
-                elem.* = try generateRec(ptr.child, ctx, child_ancestors);
+                elem.* = try generateRec(ptr.child, ctx, Set, n);
             }
             return buf;
         },
@@ -140,7 +183,7 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime ancestors: anytyp
                     @field(result, name) = attrs.defaultValue(F) orelse
                         @compileError("zigprop: comptime field without a value: " ++ name);
                 } else {
-                    @field(result, name) = try generateRec(F, ctx, child_ancestors);
+                    @field(result, name) = try generateRec(F, ctx, Set, n);
                 }
             }
             return result;
@@ -166,9 +209,12 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime ancestors: anytyp
 fn cutExists(comptime T: type) bool {
     @setEvalBranchQuota(100_000);
     switch (@typeInfo(T)) {
-        .bool, .int, .float, .@"enum", .optional => return true,
+        // void occurs as a union payload; its cut is the payload
+        // itself and consumes no draws (design v0.2 §3.3).
+        .void, .bool, .int, .float, .@"enum", .optional => return true,
         .pointer => |ptr| return ptr.size == .slice,
-        .array => |arr| return cutExists(arr.child),
+        // A zero-length array has no elements to cut.
+        .array => |arr| return arr.len == 0 or cutExists(arr.child),
         .@"struct" => |st| {
             inline for (st.field_types, st.field_attrs) |F, attrs| {
                 if (!attrs.@"comptime" and !cutExists(F)) return false;
@@ -193,6 +239,7 @@ fn generateCut(comptime T: type, ctx: *GenContext) !T {
         .@"enum" => return generateEnum(T, ctx),
         .optional => return null,
         .array => |arr| {
+            if (arr.len == 0) return .{};
             var result: T = undefined;
             for (&result) |*elem| {
                 try countElement(ctx);
@@ -512,7 +559,7 @@ fn generateFloat(comptime T: type, ctx: *GenContext) !T {
 // and the tag index only breaks ties (design v0.2 §2.2).
 // ---------------------------------------------------------------------
 
-fn generateUnion(comptime T: type, ctx: *GenContext, comptime ancestors: anytype) !T {
+fn generateUnion(comptime T: type, ctx: *GenContext, comptime Set: type, comptime n: usize) !T {
     const un = @typeInfo(T).@"union";
     if (un.tag_type == null) {
         @compileError("zigprop: untagged unions are not generated: " ++ @typeName(T) ++
@@ -529,7 +576,7 @@ fn generateUnion(comptime T: type, ctx: *GenContext, comptime ancestors: anytype
             if (Payload == void) {
                 return @unionInit(T, name, {});
             }
-            return @unionInit(T, name, try generateRec(Payload, ctx, ancestors));
+            return @unionInit(T, name, try generateRec(Payload, ctx, Set, n));
         }
     }
     unreachable; // the tag draw is in range by construction

@@ -230,6 +230,11 @@ test "runner: invalid config is rejected" {
     try std.testing.expectError(error.InvalidConfig, zigprop.check(std.testing.allocator, u32, alwaysTrue, .{ .limits = .{ .max_total_elements = 0 } }));
 }
 
+test "runner: max_cases = 0 is rejected rather than passing vacuously" {
+    try std.testing.expectError(error.InvalidConfig, zigprop.check(std.testing.allocator, u32, alwaysTrue, .{ .max_cases = 0 }));
+    try std.testing.expectError(error.InvalidConfig, zigprop.checkCustom(std.testing.allocator, u32, singleDraw, alwaysTrue, .{ .max_cases = 0 }));
+}
+
 // ---------------------------------------------------------------------
 // Regressions (design §7)
 // ---------------------------------------------------------------------

@@ -208,10 +208,12 @@ fn lessThanOne(x: f32) bool {
 }
 
 test "floats: a class-0 regression shrinks to exactly 1.0" {
-    // Choice 32 in the small-integer class is +16 (the list is
-    // rank-sorted: +0, -0, +1, -1, ..., +16, -16). The shrinker
-    // must reach the exact threshold value 1.0.
-    const entries = [_]zigprop.Regression{.{ .id = "f", .gen_version = zigprop.generator_version, .choices = &.{ 0, 32 } }};
+    // Choice 31 in the small-integer class is +16 (the list is
+    // rank-sorted with no -0: +0, +1, -1, ..., +16, -16, so index
+    // 2k-1 is +k and index 2k is -k). The failure must come from the
+    // regression, and the shrinker must reach the exact threshold
+    // value 1.0.
+    const entries = [_]zigprop.Regression{.{ .id = "f", .gen_version = zigprop.generator_version, .choices = &.{ 0, 31 } }};
     var report = try zigprop.check(std.testing.allocator, f32, lessThanOne, .{
         .seed = 0,
         .regressions = &entries,
@@ -219,10 +221,29 @@ test "floats: a class-0 regression shrinks to exactly 1.0" {
     });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
+    try std.testing.expect(report.failed.regression_index != null);
     var src: zigprop.Source = undefined;
     const v = try genFromChoices(f32, report.failed.shrunk_choices, &src);
     src.deinit();
     try std.testing.expectEqual(@as(f32, 1.0), v);
+}
+
+test "floats: a passing class-0 regression is counted, not reported as a failure" {
+    // Choice 32 is -16, which satisfies x < 1.0: the entry replays
+    // as a pass and the run's outcome is decided by random search.
+    const entries = [_]zigprop.Regression{.{ .id = "f", .gen_version = zigprop.generator_version, .choices = &.{ 0, 32 } }};
+    var report = try zigprop.check(std.testing.allocator, f32, lessThanOne, .{
+        // Seed 0's first three random cases all pass (verified by
+        // scanning seeds 0..199 with max_cases = 3).
+        .seed = 0,
+        .max_cases = 3,
+        .regressions = &entries,
+        .regression_id = "f",
+    });
+    defer report.deinit();
+    try std.testing.expect(std.meta.activeTag(report) == .passed);
+    try std.testing.expectEqual(@as(usize, 1), report.passed.regressions_passed);
+    try std.testing.expectEqual(@as(usize, 0), report.passed.stale_regressions);
 }
 
 fn selfSubtractIsZero(x: f64) bool {

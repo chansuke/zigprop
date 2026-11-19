@@ -163,6 +163,7 @@ test "recursion: shrinking a tree failure stays path-local" {
     });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
+    try std.testing.expect(report.failed.regression_index != null);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var consumed: usize = 0;

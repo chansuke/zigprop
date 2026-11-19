@@ -33,6 +33,7 @@ test "shrink: a regression entry shrinks too, and an already-minimal one stays" 
         .regression_id = "t",
     });
     defer report.deinit();
+    try std.testing.expect(report.failed.regression_index != null);
     try std.testing.expectEqual(@as(u64, 10), report.failed.shrunk_choices[0].value);
 
     const minimal = [_]zigprop.Regression{.{ .id = "t", .gen_version = zigprop.generator_version, .choices = &.{10} }};
@@ -41,6 +42,7 @@ test "shrink: a regression entry shrinks too, and an already-minimal one stays" 
         .regression_id = "t",
     });
     defer report2.deinit();
+    try std.testing.expect(report2.failed.regression_index != null);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.fixed_point, report2.failed.shrink_outcome);
     try std.testing.expectEqual(@as(u64, 10), report2.failed.shrunk_choices[0].value);
 }
@@ -198,6 +200,7 @@ test "shrink: reported evaluations equal actual generator calls" {
         .regression_id = "t",
     });
     defer report.deinit();
+    try std.testing.expect(report.failed.regression_index != null);
     // 1 call for the regression replay itself + 1 per shrink evaluation.
     try std.testing.expectEqual(counting_calls, 1 + report.failed.shrink_evaluations);
     try std.testing.expectEqual(@as(u64, 10), report.failed.shrunk_choices[0].value);
@@ -213,6 +216,7 @@ test "shrink: budget boundary — exact fit is fixed_point, one less is exhauste
         .shrink_budget = 6,
     });
     defer r6.deinit();
+    try std.testing.expect(r6.failed.regression_index != null);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.fixed_point, r6.failed.shrink_outcome);
     try std.testing.expectEqual(@as(usize, 6), r6.failed.shrink_evaluations);
 
@@ -222,6 +226,7 @@ test "shrink: budget boundary — exact fit is fixed_point, one less is exhauste
         .shrink_budget = 5,
     });
     defer r5.deinit();
+    try std.testing.expect(r5.failed.regression_index != null);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.budget_exhausted, r5.failed.shrink_outcome);
     try std.testing.expectEqual(@as(usize, 5), r5.failed.shrink_evaluations);
 }
@@ -236,6 +241,7 @@ test "shrink: an acceptance on the last budget unit still reports exhaustion nex
         .shrink_budget = 4,
     });
     defer report.deinit();
+    try std.testing.expect(report.failed.regression_index != null);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.budget_exhausted, report.failed.shrink_outcome);
     try std.testing.expectEqual(@as(usize, 4), report.failed.shrink_evaluations);
     try std.testing.expectEqual(@as(u64, 17), report.failed.shrunk_choices[0].value);
@@ -288,6 +294,7 @@ test "shrink: P1 tries unaligned chunk positions" {
     });
     defer report.deinit();
     const f = report.failed;
+    try std.testing.expect(f.regression_index != null);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.fixed_point, f.shrink_outcome);
     // After the trailing deletion, zero-padding ends the slice and
     // P3 reduces the two load-bearing values to the threshold 5.

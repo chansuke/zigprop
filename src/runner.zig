@@ -179,6 +179,9 @@ fn run(
     if (config.limits.max_depth > gen.max_depth_cap) {
         return error.InvalidConfig;
     }
+    // Zero cases would report a vacuous `.passed` without testing
+    // anything.
+    if (config.max_cases == 0) return error.InvalidConfig;
 
     var regressions_passed: usize = 0;
     var stale_regressions: usize = 0;

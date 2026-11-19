@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(meta_tests).step);
 
-    for ([_][]const u8{ "tests/meta2.zig", "tests/examples.zig", "tests/meta3.zig", "tests/meta4.zig", "tests/meta5.zig", "tests/meta6.zig", "tests/meta7.zig" }) |path| {
+    for ([_][]const u8{ "tests/meta2.zig", "tests/examples.zig", "tests/meta3.zig", "tests/meta4.zig", "tests/meta5.zig", "tests/meta6.zig", "tests/meta7.zig", "tests/meta8.zig" }) |path| {
         const extra_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(path),
@@ -64,7 +64,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zigprop", .module = mod_fast }},
         }),
     });
-    const validation_step = b.step("validation", "Run the §9 validation targets (T1 varint, T2 RLE)");
+    const validation_step = b.step("validation", "Run the §9 validation targets (T1 varint, T2 RLE, T3 float codec, T4 recursive union)");
     validation_step.dependOn(&b.addRunArtifact(validation_exe).step);
 
     const bench_step = b.step("bench", "Run benchmarks");

@@ -48,6 +48,7 @@ test "v2.1: a boundary-class failure escapes the trap and shrinks to exactly 2^2
     defer report.deinit();
     switch (report) {
         .failed => |f| {
+            try std.testing.expect(f.regression_index != null);
             try std.testing.expectEqual(@as(u32, 268435456), try replayValue(f.shrunk_choices));
         },
         else => return error.ExpectedFailure,
@@ -67,6 +68,7 @@ test "v2.1: a full-domain failure is not diverted into the boundary class" {
     defer report.deinit();
     switch (report) {
         .failed => |f| {
+            try std.testing.expect(f.regression_index != null);
             try std.testing.expectEqual(@as(u32, 268435456), try replayValue(f.shrunk_choices));
         },
         else => return error.ExpectedFailure,
