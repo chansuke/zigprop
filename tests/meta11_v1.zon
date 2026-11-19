@@ -1,0 +1,11 @@
+// A version-1 regressions file as written before v0.3 (no
+// fingerprints), plus one v0.3 entry: tests/meta11.zig imports it as a
+// zigprop.RegressionFile (design v0.3 §4.4, §4.8).
+.{
+    .version = 1,
+    .entries = .{
+        .{ .id = "v1", .gen_version = 1, .choices = .{5} },
+        .{ .id = "v1", .gen_version = 1, .choices = .{7} },
+        .{ .id = "v1", .gen_version = 1, .fingerprint = .{ .type_hash = 0x4d40aac905fa7c87, .max_len = 32, .max_depth = 8, .custom_generator = true }, .choices = .{9} },
+    },
+}

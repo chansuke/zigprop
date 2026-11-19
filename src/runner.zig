@@ -18,6 +18,9 @@ const Allocator = std.mem.Allocator;
 const source = @import("source.zig");
 const gen = @import("gen.zig");
 const shrink_mod = @import("shrink.zig");
+const fingerprint = @import("fingerprint.zig");
+pub const Fingerprint = fingerprint.Fingerprint;
+pub const FingerprintMismatch = fingerprint.Mismatch;
 const Choice = source.Choice;
 const GenContext = source.GenContext;
 const Limits = source.Limits;
@@ -36,6 +39,10 @@ pub const ShrinkOutcome = shrink_mod.ShrinkOutcome;
 pub const Regression = struct {
     id: []const u8,
     gen_version: u32,
+    /// Added in v0.3 (design §4.4). null for entries written before
+    /// v0.3 and for hand-written entries: such an entry is replayed
+    /// and, when it passes, counted as `unverified`.
+    fingerprint: ?Fingerprint = null,
     choices: []const u64,
 };
 
@@ -59,17 +66,34 @@ pub const Config = struct {
     regressions: []const Regression = &.{},
     /// Only regression entries with this id are replayed.
     regression_id: ?[]const u8 = null,
+    /// Read by the `*OrError` wrappers only (design v0.3 §4.6, Q2):
+    /// when true, any stale entry makes them return
+    /// `error.StaleRegression` (a property failure takes precedence).
+    /// Stale entries are always recorded in the Report and printed by
+    /// the wrappers.
+    fail_on_stale: bool = false,
 };
 
 /// Why a regression entry was not counted as passed (design v0.3
-/// §4.5). `fingerprint_mismatch` and `unconsumed_suffix` are decided
-/// from milestone M5 on.
-pub const StaleReason = enum { gen_version_mismatch, fingerprint_mismatch, discarded, unconsumed_suffix };
+/// §4.5).
+pub const StaleReason = enum {
+    /// Recorded by another generator version: not replayed.
+    gen_version_mismatch,
+    /// The stored fingerprint differs from the current one: not
+    /// replayed. `StaleEntry.mismatch` says which fields differ.
+    fingerprint_mismatch,
+    /// The replay was discarded (including exhaustion).
+    discarded,
+    /// The replay passed without consuming the whole entry.
+    unconsumed_suffix,
+};
 
 pub const StaleEntry = struct {
     /// Index into `Config.regressions`.
     index: usize,
     reason: StaleReason,
+    /// For `fingerprint_mismatch`: the differing fields.
+    mismatch: FingerprintMismatch = .{},
 };
 
 pub const RegressionSummary = struct {
@@ -115,6 +139,9 @@ pub const Report = union(enum) {
         /// The confirmed failing choice sequence (result-owned).
         choices: []Choice,
         shrunk_choices: []Choice,
+        /// The fingerprint of this run (type, relevant limits,
+        /// generator kind), printed with the regression entry.
+        fingerprint: Fingerprint,
         /// Displays regenerated from `choices` / `shrunk_choices`
         /// without calling the property (result-owned).
         original_value: []u8,
@@ -124,15 +151,19 @@ pub const Report = union(enum) {
         regressions: RegressionSummary,
 
         /// One line to paste into `tests/regressions.zon`'s `.entries`:
-        /// `.{ .id = "…", .gen_version = …, .choices = .{ … } },` with
-        /// the shrunk choice values. The tuple is printed the way
-        /// `zig fmt` writes it (`.{}`, `.{7}`, `.{ 3, 268435456 }`), so
-        /// a pasted entry keeps the file fmt-clean. Owned by the caller.
+        /// `.{ .id = "…", .gen_version = …, .fingerprint = .{ … },
+        /// .choices = .{ … } },` with the shrunk choice values. The
+        /// tuple is printed the way `zig fmt` writes it (`.{}`, `.{7}`,
+        /// `.{ 3, 268435456 }`), so a pasted entry keeps the file
+        /// fmt-clean. Owned by the caller.
         pub fn regressionEntry(self: *const Failed, allocator: Allocator, id: []const u8) ![]u8 {
             var out: std.Io.Writer.Allocating = .init(allocator);
             errdefer out.deinit();
             const w = &out.writer;
-            try w.print(".{{ .id = \"{f}\", .gen_version = {d}, .choices = .{{", .{ std.zig.fmtString(id), gen.generator_version });
+            const fp = self.fingerprint;
+            try w.print(".{{ .id = \"{f}\", .gen_version = {d}, .fingerprint = .{{ .type_hash = 0x{x:0>16}, .max_len = {d}, .max_depth = {d}, .custom_generator = {} }}, .choices = .{{", .{
+                std.zig.fmtString(id), gen.generator_version, fp.type_hash, fp.max_len, fp.max_depth, fp.custom_generator,
+            });
             const multi = self.shrunk_choices.len > 1;
             for (self.shrunk_choices, 0..) |c, i| {
                 try w.print("{s}{d}", .{ if (i == 0) (if (multi) " " else "") else ", ", c.value });
@@ -237,9 +268,18 @@ pub fn checkWithOrError(
     return finish(&report, config);
 }
 
-/// The only printing in zigprop (design v0.3 D26, §5.2 format).
-fn finish(report: *Report, config: Config) error{ PropertyFailed, GaveUp }!void {
+/// The only printing in zigprop (design v0.3 D26, §4.6, §5.2 format).
+/// Stale entries are always printed. Precedence of the returned error:
+/// a property failure, then giving up, then (only with
+/// `fail_on_stale`) stale entries.
+fn finish(report: *Report, config: Config) error{ PropertyFailed, GaveUp, StaleRegression }!void {
     defer report.deinit();
+    const summary = switch (report.*) {
+        .passed => |p| p.regressions,
+        .gave_up => |g| g.regressions,
+        .failed => |f| f.regressions,
+    };
+    printStale(summary, config);
     switch (report.*) {
         .passed => {},
         .gave_up => return error.GaveUp,
@@ -248,13 +288,38 @@ fn finish(report: *Report, config: Config) error{ PropertyFailed, GaveUp }!void 
             return error.PropertyFailed;
         },
     }
+    if (config.fail_on_stale and summary.stale.len > 0) return error.StaleRegression;
+}
+
+fn printStale(summary: RegressionSummary, config: Config) void {
+    const print = std.debug.print;
+    for (summary.stale) |s| {
+        const entry = config.regressions[s.index];
+        print("zigprop: stale regression #{d} \"{f}\": {s}", .{ s.index, std.zig.fmtString(entry.id), @tagName(s.reason) });
+        switch (s.reason) {
+            .gen_version_mismatch => print(" (entry {d}, current {d}); not replayed", .{ entry.gen_version, gen.generator_version }),
+            .fingerprint_mismatch => {
+                print(" (differs:", .{});
+                inline for (@typeInfo(FingerprintMismatch).@"struct".field_names) |name| {
+                    if (@field(s.mismatch, name)) print(" {s}", .{name});
+                }
+                print("); not replayed", .{});
+            },
+            .discarded => print("; the replay was discarded", .{}),
+            .unconsumed_suffix => print("; the replay passed without consuming the whole entry", .{}),
+        }
+        print(". Re-run and paste the newly printed entry.\n", .{});
+    }
 }
 
 fn printFailure(f: *const Report.Failed, config: Config) void {
     const print = std.debug.print;
     switch (f.origin) {
         .random => |r| print("zigprop: property failed (seed {d}, attempt {d})\n", .{ r.seed, r.attempt_index }),
-        .regression => |r| print("zigprop: property failed (regression #{d} \"{f}\")\n", .{ r.index, std.zig.fmtString(config.regressions[r.index].id) }),
+        .regression => |r| {
+            print("zigprop: property failed (regression #{d} \"{f}\")\n", .{ r.index, std.zig.fmtString(config.regressions[r.index].id) });
+            if (r.stale) |reason| print("  note: the entry is also stale ({s})\n", .{@tagName(reason)});
+        },
     }
     switch (f.failure) {
         .returned_false => print("  failure: returned false\n", .{}),
@@ -318,6 +383,7 @@ fn makeFailed(
     property: PropertyWith(Ctx, T),
     config: Config,
     origin: Origin,
+    fp: Fingerprint,
     fail: @FieldType(shrink_mod.AttemptResult, "fail"),
     summary: RegressionSummaryDraft,
 ) !Report {
@@ -358,6 +424,7 @@ fn makeFailed(
         .failure = fail.failure,
         .choices = fail.choices,
         .shrunk_choices = sr.choices,
+        .fingerprint = fp,
         .original_value = original,
         .shrunk_value = shrunk,
         .shrink_evaluations = sr.evaluations,
@@ -403,17 +470,32 @@ fn run(
     // anything.
     if (config.max_cases == 0) return error.InvalidConfig;
 
+    // The fingerprint of this run (design v0.3 §4.2-§4.3).
+    const fp = fingerprint.of(T, config.limits, generator != null);
+
     var regressions_passed: usize = 0;
+    var unverified: usize = 0;
     var stale: std.ArrayList(StaleEntry) = .empty;
     defer stale.deinit(allocator);
 
-    // Phase A: replay matching regression entries first (design §7).
+    // Phase A: replay matching regression entries first (design §7),
+    // classified by the v0.3 §4.5 decision table. Stale is an enum
+    // value here, never an error name (§4.5, §5.3).
     if (config.regression_id) |rid| {
         for (config.regressions, 0..) |entry, idx| {
             if (!std.mem.eql(u8, entry.id, rid)) continue;
+            // Row 1: another generator version -> not replayed.
             if (entry.gen_version != gen.generator_version) {
                 try stale.append(allocator, .{ .index = idx, .reason = .gen_version_mismatch });
                 continue;
+            }
+            // Row 2: a stored fingerprint that differs -> not replayed.
+            if (entry.fingerprint) |stored| {
+                const mismatch = fingerprint.compare(stored, fp);
+                if (mismatch.any()) {
+                    try stale.append(allocator, .{ .index = idx, .reason = .fingerprint_mismatch, .mismatch = mismatch });
+                    continue;
+                }
             }
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
@@ -425,18 +507,31 @@ fn run(
             var src = Source.initReplay(aa, replay_choices, config.limits.max_draws);
             defer src.deinit();
             const result = try shrink_mod.evaluateAttempt(allocator, T, Ctx, ctx, generator, property, &src, aa, config.limits, true);
+            const suffix = src.pos < entry.choices.len;
             switch (result) {
-                .pass => regressions_passed += 1,
+                // Rows 5-7.
+                .pass => if (suffix) {
+                    try stale.append(allocator, .{ .index = idx, .reason = .unconsumed_suffix });
+                } else {
+                    regressions_passed += 1;
+                    if (entry.fingerprint == null) unverified += 1;
+                },
+                // Row 4.
                 .discard => try stale.append(allocator, .{ .index = idx, .reason = .discarded }),
-                .fail => |f| return makeFailed(allocator, T, Ctx, ctx, generator, property, config, .{ .regression = .{ .index = idx, .stale = null } }, f, .{
+                // Row 3: a real failure is always reported; a suffix is
+                // noted on the origin.
+                .fail => |f| return makeFailed(allocator, T, Ctx, ctx, generator, property, config, .{ .regression = .{
+                    .index = idx,
+                    .stale = if (suffix) .unconsumed_suffix else null,
+                } }, fp, f, .{
                     .passed = regressions_passed,
-                    .unverified = 0,
+                    .unverified = unverified,
                     .stale = stale.items,
                 }),
             }
         }
     }
-    const summary: RegressionSummaryDraft = .{ .passed = regressions_passed, .unverified = 0, .stale = stale.items };
+    const summary: RegressionSummaryDraft = .{ .passed = regressions_passed, .unverified = unverified, .stale = stale.items };
 
     // Phase B: random search. The attempt index advances on discards
     // too, so a case is never retried under the same derived seed.
@@ -469,7 +564,7 @@ fn run(
         switch (result) {
             .pass => cases += 1,
             .discard => discards += 1,
-            .fail => |f| return makeFailed(allocator, T, Ctx, ctx, generator, property, config, .{ .random = .{ .seed = config.seed, .attempt_index = attempt } }, f, summary),
+            .fail => |f| return makeFailed(allocator, T, Ctx, ctx, generator, property, config, .{ .random = .{ .seed = config.seed, .attempt_index = attempt } }, fp, f, summary),
         }
         attempt += 1;
     }

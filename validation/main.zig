@@ -467,6 +467,151 @@ fn propT7Correct(xs: []const u8) bool {
 }
 
 // ---------------------------------------------------------------------
+// T8: stale detection (design v0.3 §8.2). Entries are printed by
+// Report.Failed.regressionEntry for T1 (u32), T6 (Tree) and T7
+// ([]const u8) failures on seeds 0..9, parsed back from that text, and
+// replayed under the changes of rows (a)-(j). Row (f)'s "variant
+// added" needs a union-typed entry, which T1/T6/T7 cannot provide: it
+// uses T4 (Value) failures (a deviation from the registered entry
+// sources, reported). Row (j) needs a custom-generator entry: T1's
+// type and mutant through a custom single-draw generator.
+// ---------------------------------------------------------------------
+
+fn hasSevenGeneric(comptime TT: type, comptime vname: []const u8, comptime kname: []const u8, t: TT) bool {
+    if (@field(t, vname) == 7) return true;
+    for (@field(t, kname)) |k| {
+        if (hasSevenGeneric(TT, vname, kname, k)) return true;
+    }
+    return false;
+}
+
+/// Tree with a type rename only (row g).
+const TreeRenamed = struct { value: i64, kids: []const TreeRenamed };
+/// Tree with its fields renamed (row g).
+const TreeFieldsRenamed = struct { val: i64, children: []const TreeFieldsRenamed };
+/// Tree with its fields reordered (row f).
+const TreeReordered = struct { kids: []const TreeReordered, value: i64 };
+
+fn propTreeRenamedMutant(t: TreeRenamed) bool {
+    return !hasSevenGeneric(TreeRenamed, "value", "kids", t);
+}
+
+fn propTreeFieldsRenamedMutant(t: TreeFieldsRenamed) bool {
+    return !hasSevenGeneric(TreeFieldsRenamed, "val", "children", t);
+}
+
+fn propTreeReorderedMutant(t: TreeReordered) bool {
+    return !hasSevenGeneric(TreeReordered, "value", "kids", t);
+}
+
+/// u32 widened to u64 (row f); fails exactly where T1's mutant does.
+fn propU64Mutant(x: u64) bool {
+    return x < (1 << 28);
+}
+
+/// Value with one more variant (row f).
+const ValueMore = union(enum) { int: i64, str: []const u8, list: []const ValueMore, flag: bool };
+
+fn valueMoreHasLongList(v: ValueMore) bool {
+    switch (v) {
+        .list => |items| {
+            if (items.len >= 3) return true;
+            for (items) |item| {
+                if (valueMoreHasLongList(item)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn propValueMoreMutant(v: ValueMore) bool {
+    return !valueMoreHasLongList(v);
+}
+
+fn genU32Single(ctx: *zigprop.GenContext) anyerror!u32 {
+    return @intCast(ctx.range(1 << 32));
+}
+
+/// Row (j): the same draw shape as genU32Single, a different mapping.
+fn genU32Shifted(ctx: *zigprop.GenContext) anyerror!u32 {
+    return @as(u32, @intCast(ctx.range(1 << 32))) ^ 0x5555;
+}
+
+/// The printed entry of a failure, parsed back from its text (what a
+/// user pastes into regressions.zon). Arena-owned.
+fn t8Entry(arena: std.mem.Allocator, f: *const zigprop.Report.Failed) !zigprop.Regression {
+    const line = try f.regressionEntry(arena, "t8");
+    const text = try std.fmt.allocPrintSentinel(arena, ".{{ .version = 1, .entries = .{{ {s} }} }}", .{line}, 0);
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const file = try std.zon.parse.fromSlice(zigprop.RegressionFile, .{ .gpa = arena, .arena = arena, .source = text, .diagnostics = &diag });
+    if (file.entries.len != 1 or file.entries[0].fingerprint == null) return error.UnexpectedEntry;
+    return file.entries[0];
+}
+
+/// What one T8 replay produced.
+const T8Outcome = struct {
+    /// The report is a failure that came from the entry.
+    failed_from_entry: bool = false,
+    origin_stale: ?zigprop.StaleReason = null,
+    passed: usize = 0,
+    unverified: usize = 0,
+    stale_count: usize = 0,
+    stale: ?zigprop.StaleEntry = null,
+};
+
+fn t8Replay(comptime T: type, gpa: std.mem.Allocator, generator: ?zigprop.Generator(T), property: *const fn (T) bool, entry: zigprop.Regression, limits: zigprop.Limits) !T8Outcome {
+    const entries = [_]zigprop.Regression{entry};
+    const cfg: zigprop.Config = .{ .seed = 1234, .max_cases = 1, .limits = limits, .regressions = &entries, .regression_id = entry.id };
+    var r = if (generator) |g| try zigprop.checkCustom(gpa, T, g, property, cfg) else try zigprop.check(gpa, T, property, cfg);
+    defer r.deinit();
+    const summary = switch (r) {
+        .passed => |p| p.regressions,
+        .gave_up => |g| g.regressions,
+        .failed => |f| f.regressions,
+    };
+    var out: T8Outcome = .{ .passed = summary.passed, .unverified = summary.unverified, .stale_count = summary.stale.len };
+    if (summary.stale.len > 0) out.stale = summary.stale[0];
+    if (r == .failed and r.failed.origin == .regression) {
+        out.failed_from_entry = true;
+        out.origin_stale = r.failed.origin.regression.stale;
+    }
+    return out;
+}
+
+fn t8Stale(o: T8Outcome, reason: zigprop.StaleReason) bool {
+    return o.stale_count == 1 and o.stale.?.reason == reason and !o.failed_from_entry;
+}
+
+fn withSuffix(arena: std.mem.Allocator, e: zigprop.Regression) !zigprop.Regression {
+    var out = e;
+    const c = try arena.alloc(u64, e.choices.len + 1);
+    @memcpy(c[0..e.choices.len], e.choices);
+    c[e.choices.len] = 0;
+    out.choices = c;
+    return out;
+}
+
+fn withoutFingerprint(e: zigprop.Regression) zigprop.Regression {
+    var out = e;
+    out.fingerprint = null;
+    return out;
+}
+
+const T8Row = struct {
+    name: []const u8,
+    ok: usize = 0,
+    total: usize = 0,
+    /// The row expects the change to be missed (row j).
+    known_miss: bool = false,
+
+    fn add(self: *T8Row, ok: bool) void {
+        self.total += 1;
+        if (ok) self.ok += 1;
+    }
+};
+
+// ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
 
@@ -965,4 +1110,131 @@ pub fn main(init: std.process.Init) !void {
     out.print("T9e criterion (>=8 discovered AND kind reported on every discovery AND 0 kind violations AND 0 leaks): {s}\n", .{
         if (t9e_found >= 8 and t9e_kind == t9e_found and t9e_violations == 0 and t9e_leaks == 0) "MET" else "NOT MET",
     });
+
+    // ---------------- T8 ----------------
+    out.print("\n== T8 stale detection (entries printed by regressionEntry, parsed back) ==\n", .{});
+    var rows = [_]T8Row{
+        .{ .name = "(a) same config, same mutant -> reported as a failure, not stale [u32]" },
+        .{ .name = "(a) same config, same mutant -> reported as a failure, not stale [Tree]" },
+        .{ .name = "(a) same config, same mutant -> reported as a failure, not stale [[]const u8]" },
+        .{ .name = "(b) same config, correct impl -> passed, stale 0, unverified 0 [u32]" },
+        .{ .name = "(b) same config, correct impl -> passed, stale 0, unverified 0 [Tree]" },
+        .{ .name = "(b) same config, correct impl -> passed, stale 0, unverified 0 [[]const u8]" },
+        .{ .name = "(c) []const u8, max_len 32 -> 16 -> stale fingerprint_mismatch (max_len)" },
+        .{ .name = "(d) u32, max_len changed -> not stale (normalized to 0)" },
+        .{ .name = "(e) Tree, max_depth 3 -> 2 -> stale fingerprint_mismatch (max_depth)" },
+        .{ .name = "(f) u32 -> u64 -> stale (type_hash)" },
+        .{ .name = "(f) Tree fields reordered -> stale (type_hash)" },
+        .{ .name = "(f) Value + one variant -> stale (type_hash) [T4 entries, see note]" },
+        .{ .name = "(g) Tree type renamed -> not stale" },
+        .{ .name = "(g) Tree fields renamed -> not stale" },
+        .{ .name = "(h) suffix appended, correct impl -> stale unconsumed_suffix, not passed [u32]" },
+        .{ .name = "(h) suffix appended, correct impl -> stale unconsumed_suffix, not passed [Tree]" },
+        .{ .name = "(h) suffix appended, correct impl -> stale unconsumed_suffix, not passed [[]const u8]" },
+        .{ .name = "(i) fingerprint removed, correct impl -> passed, unverified [u32]" },
+        .{ .name = "(i) fingerprint removed, correct impl -> passed, unverified [Tree]" },
+        .{ .name = "(i) fingerprint removed, correct impl -> passed, unverified [[]const u8]" },
+        .{ .name = "(j) KNOWN MISS: custom generator mapping changed, same draw shape -> not stale", .known_miss = true },
+    };
+    var t8_sources_found: usize = 0;
+    {
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        for (0..10) |seed| {
+            const cfg: zigprop.Config = .{ .seed = seed, .max_cases = 200 };
+            var r1 = try zigprop.check(allocator, u32, propVarintMutant, cfg);
+            defer r1.deinit();
+            var r6 = try zigprop.check(allocator, Tree, propT6Mutant, .{ .seed = seed, .max_cases = 200, .limits = t6_limits });
+            defer r6.deinit();
+            var r7 = try zigprop.check(allocator, []const u8, propT7Mutant, cfg);
+            defer r7.deinit();
+            var r4 = try zigprop.check(allocator, Value, propValueMutant, cfg);
+            defer r4.deinit();
+            var rj = try zigprop.checkCustom(allocator, u32, genU32Single, propVarintMutant, cfg);
+            defer rj.deinit();
+            if (r1 != .failed or r6 != .failed or r7 != .failed or r4 != .failed or rj != .failed) {
+                out.print("{d:>4} | an entry source did not fail; seed skipped\n", .{seed});
+                continue;
+            }
+            t8_sources_found += 1;
+            const e1 = try t8Entry(a, &r1.failed);
+            const e6 = try t8Entry(a, &r6.failed);
+            const e7 = try t8Entry(a, &r7.failed);
+            const e4 = try t8Entry(a, &r4.failed);
+            const ej = try t8Entry(a, &rj.failed);
+            const d: zigprop.Limits = .{};
+            var row: usize = 0;
+            // (a)
+            const a1 = try t8Replay(u32, allocator, null, propVarintMutant, e1, d);
+            rows[row].add(a1.failed_from_entry and a1.origin_stale == null and a1.stale_count == 0);
+            row += 1;
+            const a6 = try t8Replay(Tree, allocator, null, propT6Mutant, e6, t6_limits);
+            rows[row].add(a6.failed_from_entry and a6.origin_stale == null and a6.stale_count == 0);
+            row += 1;
+            const a7 = try t8Replay([]const u8, allocator, null, propT7Mutant, e7, d);
+            rows[row].add(a7.failed_from_entry and a7.origin_stale == null and a7.stale_count == 0);
+            row += 1;
+            // (b)
+            inline for (.{ .{ u32, e1, propVarintCorrect, d }, .{ Tree, e6, propT6Correct, t6_limits }, .{ []const u8, e7, propT7Correct, d } }) |c| {
+                const o = try t8Replay(c[0], allocator, null, c[2], c[1], c[3]);
+                rows[row].add(!o.failed_from_entry and o.passed == 1 and o.stale_count == 0 and o.unverified == 0);
+                row += 1;
+            }
+            // (c)
+            const oc = try t8Replay([]const u8, allocator, null, propT7Mutant, e7, .{ .max_len = 16 });
+            rows[row].add(t8Stale(oc, .fingerprint_mismatch) and oc.stale.?.mismatch.max_len);
+            row += 1;
+            // (d)
+            const od = try t8Replay(u32, allocator, null, propVarintMutant, e1, .{ .max_len = 7 });
+            rows[row].add(od.failed_from_entry and od.stale_count == 0 and od.origin_stale == null);
+            row += 1;
+            // (e)
+            const oe = try t8Replay(Tree, allocator, null, propT6Mutant, e6, .{ .max_len = 4, .max_depth = 2 });
+            rows[row].add(t8Stale(oe, .fingerprint_mismatch) and oe.stale.?.mismatch.max_depth);
+            row += 1;
+            // (f)
+            const of1 = try t8Replay(u64, allocator, null, propU64Mutant, e1, d);
+            rows[row].add(t8Stale(of1, .fingerprint_mismatch) and of1.stale.?.mismatch.type_hash);
+            row += 1;
+            const of2 = try t8Replay(TreeReordered, allocator, null, propTreeReorderedMutant, e6, t6_limits);
+            rows[row].add(t8Stale(of2, .fingerprint_mismatch) and of2.stale.?.mismatch.type_hash);
+            row += 1;
+            const of3 = try t8Replay(ValueMore, allocator, null, propValueMoreMutant, e4, d);
+            rows[row].add(t8Stale(of3, .fingerprint_mismatch) and of3.stale.?.mismatch.type_hash);
+            row += 1;
+            // (g)
+            const og1 = try t8Replay(TreeRenamed, allocator, null, propTreeRenamedMutant, e6, t6_limits);
+            rows[row].add(og1.failed_from_entry and og1.stale_count == 0);
+            row += 1;
+            const og2 = try t8Replay(TreeFieldsRenamed, allocator, null, propTreeFieldsRenamedMutant, e6, t6_limits);
+            rows[row].add(og2.failed_from_entry and og2.stale_count == 0);
+            row += 1;
+            // (h)
+            inline for (.{ .{ u32, e1, propVarintCorrect, d }, .{ Tree, e6, propT6Correct, t6_limits }, .{ []const u8, e7, propT7Correct, d } }) |c| {
+                const o = try t8Replay(c[0], allocator, null, c[2], try withSuffix(a, c[1]), c[3]);
+                rows[row].add(t8Stale(o, .unconsumed_suffix) and o.passed == 0);
+                row += 1;
+            }
+            // (i)
+            inline for (.{ .{ u32, e1, propVarintCorrect, d }, .{ Tree, e6, propT6Correct, t6_limits }, .{ []const u8, e7, propT7Correct, d } }) |c| {
+                const o = try t8Replay(c[0], allocator, null, c[2], withoutFingerprint(c[1]), c[3]);
+                rows[row].add(!o.failed_from_entry and o.passed == 1 and o.unverified == 1 and o.stale_count == 0);
+                row += 1;
+            }
+            // (j) the known miss
+            const oj = try t8Replay(u32, allocator, genU32Shifted, propVarintCorrect, ej, d);
+            rows[row].add(oj.stale_count == 0);
+            row += 1;
+            std.debug.assert(row == rows.len);
+        }
+    }
+    var t8_all = t8_sources_found == 10;
+    for (rows) |r| {
+        const met = r.total == 10 and r.ok == 10;
+        if (!met) t8_all = false;
+        out.print("  {s}: {d}/{d}{s}\n", .{ r.name, r.ok, r.total, if (r.known_miss) " (missed, as documented)" else "" });
+    }
+    out.print("T8: entry sources failed on {d}/10 seeds; rows met {s}\n", .{ t8_sources_found, if (t8_all) "all" else "NOT all" });
+    out.print("T8 criterion (every row 10/10): {s}\n", .{if (t8_all) "MET" else "NOT MET"});
 }

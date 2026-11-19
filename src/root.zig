@@ -43,6 +43,8 @@ pub const StaleEntry = runner_mod.StaleEntry;
 pub const ShrinkOutcome = runner_mod.ShrinkOutcome;
 pub const Regression = runner_mod.Regression;
 pub const RegressionFile = runner_mod.RegressionFile;
+pub const Fingerprint = runner_mod.Fingerprint;
+pub const FingerprintMismatch = runner_mod.FingerprintMismatch;
 
 /// Not covered by any stability promise (design v0.3 §5.6, D28): the
 /// surface zigprop's own tests and validation use.
@@ -61,6 +63,9 @@ pub const internal = struct {
     pub const ShrinkPass = shrink_mod.ShrinkPass;
     pub const AcceptEvent = shrink_mod.AcceptEvent;
     pub const AcceptHook = shrink_mod.AcceptHook;
+    /// The structural hash, its serialization and the reachability
+    /// predicates behind the fingerprint (design v0.3 §4.2-§4.3).
+    pub const fingerprint = @import("fingerprint.zig");
 };
 
 test {
@@ -68,4 +73,5 @@ test {
     _ = gen_mod;
     _ = @import("shrink.zig");
     _ = runner_mod;
+    _ = @import("fingerprint.zig");
 }

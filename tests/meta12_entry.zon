@@ -4,6 +4,6 @@
 .{
     .version = 1,
     .entries = .{
-        .{ .id = "m12", .gen_version = 1, .choices = .{10} },
+        .{ .id = "m12", .gen_version = 1, .fingerprint = .{ .type_hash = 0x4d40aac905fa7c87, .max_len = 32, .max_depth = 8, .custom_generator = true }, .choices = .{10} },
     },
 }
