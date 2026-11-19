@@ -176,6 +176,9 @@ fn run(
     if (config.limits.max_total_elements == 0 or config.limits.max_draws == 0) {
         return error.InvalidConfig;
     }
+    if (config.limits.max_depth > gen.max_depth_cap) {
+        return error.InvalidConfig;
+    }
 
     var regressions_passed: usize = 0;
     var stale_regressions: usize = 0;

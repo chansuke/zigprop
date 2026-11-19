@@ -22,16 +22,84 @@ pub fn countElement(ctx: *GenContext) error{InvalidGeneration}!void {
     }
 }
 
+/// Comptime unfolding cap for recursive types (design v0.2 §3.2,
+/// MF1): a type may appear at most this many times among the
+/// ancestors of a generation point. The specialization at the cap
+/// generates the cut form and contains no further recursive calls,
+/// which is what makes compilation of recursive types terminate —
+/// a runtime check alone cannot do that. `Limits.max_depth` must
+/// not exceed this value.
+pub const max_depth_cap: usize = 16;
+
 pub fn generate(comptime T: type, ctx: *GenContext) !T {
+    return generateRec(T, ctx, .{});
+}
+
+fn countOccurrences(comptime T: type, comptime ancestors: anytype) usize {
+    var n: usize = 0;
+    inline for (ancestors) |a| {
+        if (a == T) n += 1;
+    }
+    return n;
+}
+
+/// A recursive occurrence is the re-entry of a named container
+/// type (struct or union) already present among the ancestors.
+/// The channels that mediate recursion in legal Zig types —
+/// slices, optionals, arrays — also repeat along a cycle, but
+/// they are not occurrences: counting them would cut a recursive
+/// value's own kids slice the moment depth is spent (the element
+/// type's slice is already an ancestor). Every cycle in a legal
+/// type graph passes through a struct or union (a cycle through
+/// channels alone would be infinitely sized), so gating on
+/// containers loses no recursion.
+fn isRecursiveOccurrence(comptime T: type, comptime ancestors: anytype) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union" => countOccurrences(T, ancestors) > 0,
+        else => false,
+    };
+}
+
+fn atUnfoldingCap(comptime T: type, comptime ancestors: anytype) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union" => countOccurrences(T, ancestors) >= max_depth_cap,
+        else => false,
+    };
+}
+
+fn generateRec(comptime T: type, ctx: *GenContext, comptime ancestors: anytype) !T {
+    if (comptime atUnfoldingCap(T, ancestors)) {
+        return generateCut(T, ctx);
+    } else {
+        return generateNormal(T, ctx, ancestors);
+    }
+}
+
+fn generateNormal(comptime T: type, ctx: *GenContext, comptime ancestors: anytype) !T {
+    // A recursive occurrence spends one level of the runtime depth
+    // budget (design v0.2 §3.4, MF5). The restore is deferred at
+    // function scope — a defer inside the if block would run when
+    // the block closes, before any field is generated.
+    const is_recursive = comptime isRecursiveOccurrence(T, ancestors);
+    if (is_recursive) {
+        if (ctx.depth >= ctx.limits.max_depth) {
+            return generateCut(T, ctx);
+        }
+        ctx.depth += 1;
+    }
+    defer if (is_recursive) {
+        ctx.depth -= 1;
+    };
+    const child_ancestors = ancestors ++ .{T};
     switch (@typeInfo(T)) {
         .bool => return ctx.src.boolean(),
         .int => return generateInt(T, ctx),
         .float => return generateFloat(T, ctx),
-        .@"union" => return generateUnion(T, ctx),
+        .@"union" => return generateUnion(T, ctx, child_ancestors),
         .@"enum" => return generateEnum(T, ctx),
         .optional => |opt| {
             if (ctx.src.boolean()) {
-                return try generate(opt.child, ctx);
+                return try generateRec(opt.child, ctx, child_ancestors);
             }
             return null;
         },
@@ -39,7 +107,7 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
             var result: T = undefined;
             for (&result) |*elem| {
                 try countElement(ctx);
-                elem.* = try generate(arr.child, ctx);
+                elem.* = try generateRec(arr.child, ctx, child_ancestors);
             }
             return result;
         },
@@ -49,7 +117,7 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
                     " (only slices are generated; use checkCustom for other shapes)");
             }
             if (ptr.sentinel() != null) {
-                @compileError("zigprop: sentinel-terminated slices are not supported in Phase 0: " ++
+                @compileError("zigprop: sentinel-terminated slices are not supported: " ++
                     @typeName(T) ++ " (use the plain slice type instead)");
             }
             const len = ctx.src.length(ctx.limits.max_len);
@@ -60,7 +128,7 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
             errdefer ctx.allocator.free(buf);
             for (buf) |*elem| {
                 try countElement(ctx);
-                elem.* = try generate(ptr.child, ctx);
+                elem.* = try generateRec(ptr.child, ctx, child_ancestors);
             }
             return buf;
         },
@@ -72,10 +140,102 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
                     @field(result, name) = attrs.defaultValue(F) orelse
                         @compileError("zigprop: comptime field without a value: " ++ name);
                 } else {
-                    @field(result, name) = try generate(F, ctx);
+                    @field(result, name) = try generateRec(F, ctx, child_ancestors);
                 }
             }
             return result;
+        },
+        else => @compileError("zigprop: unsupported type " ++ @typeName(T) ++
+            " (generates bool, integers of 1-64 bits, f16/f32/f64, enums, tagged unions, " ++
+            "optionals, arrays, slices and structs; use checkCustom for anything else)"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Cut forms (design v0.2 §3.3, MF2): the minimal form generated at
+// the depth limit or the comptime cap. Cut mode stops the recursive
+// channels only — slices are empty (no length draw), optionals are
+// null (no draw), a union takes its first variant whose payload
+// has a cut form (no tag draw) — while scalar fields still draw
+// normally. Cut generation descends only through struct fields,
+// array elements and union payloads; a cycle through those
+// channels alone would be an infinitely-sized type, which Zig
+// rejects, so both this function and cutExists terminate.
+// ---------------------------------------------------------------------
+
+fn cutExists(comptime T: type) bool {
+    @setEvalBranchQuota(100_000);
+    switch (@typeInfo(T)) {
+        .bool, .int, .float, .@"enum", .optional => return true,
+        .pointer => |ptr| return ptr.size == .slice,
+        .array => |arr| return cutExists(arr.child),
+        .@"struct" => |st| {
+            inline for (st.field_types, st.field_attrs) |F, attrs| {
+                if (!attrs.@"comptime" and !cutExists(F)) return false;
+            }
+            return true;
+        },
+        .@"union" => |un| {
+            inline for (un.field_types) |P| {
+                if (cutExists(P)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn generateCut(comptime T: type, ctx: *GenContext) !T {
+    switch (@typeInfo(T)) {
+        .bool => return ctx.src.boolean(),
+        .int => return generateInt(T, ctx),
+        .float => return generateFloat(T, ctx),
+        .@"enum" => return generateEnum(T, ctx),
+        .optional => return null,
+        .array => |arr| {
+            var result: T = undefined;
+            for (&result) |*elem| {
+                try countElement(ctx);
+                elem.* = try generateCut(arr.child, ctx);
+            }
+            return result;
+        },
+        .pointer => |ptr| {
+            if (ptr.size != .slice) {
+                @compileError("zigprop: unsupported pointer type " ++ @typeName(T) ++
+                    " (only slices are generated; use checkCustom for other shapes)");
+            }
+            if (ptr.sentinel() != null) {
+                @compileError("zigprop: sentinel-terminated slices are not supported: " ++
+                    @typeName(T) ++ " (use the plain slice type instead)");
+            }
+            return ctx.allocator.alloc(ptr.child, 0);
+        },
+        .@"struct" => |st| {
+            var result: T = undefined;
+            inline for (st.field_names, st.field_types, st.field_attrs) |name, F, attrs| {
+                if (attrs.@"comptime") {
+                    @field(result, name) = attrs.defaultValue(F) orelse
+                        @compileError("zigprop: comptime field without a value: " ++ name);
+                } else {
+                    @field(result, name) = try generateCut(F, ctx);
+                }
+            }
+            return result;
+        },
+        .@"union" => |un| {
+            if (un.tag_type == null) {
+                @compileError("zigprop: untagged unions are not generated: " ++ @typeName(T));
+            }
+            inline for (un.field_names, un.field_types) |name, Payload| {
+                if (comptime cutExists(Payload)) {
+                    if (Payload == void) {
+                        return @unionInit(T, name, {});
+                    }
+                    return @unionInit(T, name, try generateCut(Payload, ctx));
+                }
+            }
+            return error.InvalidGeneration;
         },
         else => @compileError("zigprop: unsupported type " ++ @typeName(T) ++
             " (generates bool, integers of 1-64 bits, f16/f32/f64, enums, tagged unions, " ++
@@ -352,7 +512,7 @@ fn generateFloat(comptime T: type, ctx: *GenContext) !T {
 // and the tag index only breaks ties (design v0.2 §2.2).
 // ---------------------------------------------------------------------
 
-fn generateUnion(comptime T: type, ctx: *GenContext) !T {
+fn generateUnion(comptime T: type, ctx: *GenContext, comptime ancestors: anytype) !T {
     const un = @typeInfo(T).@"union";
     if (un.tag_type == null) {
         @compileError("zigprop: untagged unions are not generated: " ++ @typeName(T) ++
@@ -369,7 +529,7 @@ fn generateUnion(comptime T: type, ctx: *GenContext) !T {
             if (Payload == void) {
                 return @unionInit(T, name, {});
             }
-            return @unionInit(T, name, try generate(Payload, ctx));
+            return @unionInit(T, name, try generateRec(Payload, ctx, ancestors));
         }
     }
     unreachable; // the tag draw is in range by construction

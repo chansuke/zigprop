@@ -14,6 +14,7 @@ pub const deriveSeed = source.deriveSeed;
 
 pub const generate = gen_mod.generate;
 pub const generator_version = gen_mod.generator_version;
+pub const max_depth_cap = gen_mod.max_depth_cap;
 
 pub const shrink = @import("shrink.zig").shrink;
 pub const ShrinkResult = @import("shrink.zig").ShrinkResult;

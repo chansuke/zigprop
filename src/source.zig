@@ -23,6 +23,11 @@ pub const Limits = struct {
     max_total_elements: usize = 4096,
     /// Maximum number of draws for one case.
     max_draws: usize = 100_000,
+    /// Maximum nesting depth of recursive occurrences (design
+    /// v0.2 §3.4). Must not exceed gen.max_depth_cap (the comptime
+    /// unfolding cap); the runner rejects larger values as
+    /// InvalidConfig.
+    max_depth: usize = 8,
 };
 
 /// The context handed to generators (design §3, MF6).
@@ -34,6 +39,11 @@ pub const GenContext = struct {
     /// Array/slice elements generated so far in this attempt (design
     /// §4, MF8). Generators increment this via gen.countElement.
     elements_generated: usize = 0,
+    /// Current nesting depth of recursive occurrences (design
+    /// v0.2 §3.4). Generation increments it when entering a
+    /// recursive occurrence and restores it on every exit path;
+    /// custom generators calling back into generate share it.
+    depth: usize = 0,
 };
 
 /// Derives the independent PRNG seed for one attempt (design §5).
