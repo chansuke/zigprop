@@ -1,14 +1,17 @@
 //! Shrinking (design §6) and the shared attempt evaluator (§5, MF5).
 //!
 //! The predicate is P(C) = "replaying the choice sequence C fails".
-//! A candidate is accepted only when its *re-recorded consumed*
-//! sequence is strictly shortlex-smaller than the stored best
-//! (MF2), so the stored state strictly decreases with every
-//! acceptance and cannot cycle. Passes P1 (chunk deletion), P2
-//! (zeroing) and P3 (power-of-two decrease) repeat until a full
-//! round changes nothing (`fixed_point`) or the evaluation budget
-//! runs out (`budget_exhausted`). Infrastructure errors abort the
-//! shrink and propagate.
+//! A candidate is accepted only when the key sequence of its
+//! *re-recorded consumed* sequence is strictly shortlex-smaller
+//! than the stored best (MF2, v2.1: keys are canonical — an integer
+//! pair contributes its value's rank, so acceptance compares value
+//! simplicity rather than class encodings). P4 (re-expression)
+//! additionally accepts a key-equal lateral move that rewrites an
+//! integer pair into the full-domain class so P3 can descend it.
+//! Passes repeat until a full round changes nothing
+//! (`fixed_point`) or the evaluation budget runs out
+//! (`budget_exhausted`). Infrastructure errors abort the shrink
+//! and propagate.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -30,6 +33,10 @@ pub const AttemptResult = union(enum) {
     fail: struct {
         /// The consumed choice sequence, owned by the result allocator.
         choices: []Choice,
+        /// Canonical key per choice, result-owned (design §4.1, v2.1).
+        keys: []u64,
+        /// Key-comparison skip flags, result-owned.
+        skips: []bool,
         /// Display snapshot of the failing value, result-owned.
         value_display: []u8,
     },
@@ -69,8 +76,12 @@ pub fn evaluateAttempt(
     if (property(value)) return .pass;
     const choices = try result_allocator.dupe(Choice, src.recorded.items);
     errdefer result_allocator.free(choices);
+    const keys = try result_allocator.dupe(u64, src.recorded_keys.items);
+    errdefer result_allocator.free(keys);
+    const skips = try result_allocator.dupe(bool, src.recorded_skip.items);
+    errdefer result_allocator.free(skips);
     const display = try std.fmt.allocPrint(result_allocator, "{any}", .{value});
-    return .{ .fail = .{ .choices = choices, .value_display = display } };
+    return .{ .fail = .{ .choices = choices, .keys = keys, .skips = skips, .value_display = display } };
 }
 
 pub const ShrinkResult = struct {
@@ -82,14 +93,37 @@ pub const ShrinkResult = struct {
     outcome: ShrinkOutcome,
 };
 
-/// Strict shortlex order on the *value* sequences of two consumed
-/// choice lists: shorter first, then lexicographic (design §6, MF2).
-pub fn shortlexLess(a: []const Choice, b: []const Choice) bool {
-    if (a.len != b.len) return a.len < b.len;
-    for (a, b) |x, y| {
-        if (x.value != y.value) return x.value < y.value;
+fn filteredLen(skip: []const bool) usize {
+    var n: usize = 0;
+    for (skip) |s| {
+        if (!s) n += 1;
     }
-    return false;
+    return n;
+}
+
+/// Strict shortlex order on two key sequences (design §6, v2.1):
+/// positions whose skip flag is set are excluded; compare the
+/// filtered length first, then lexicographically. With no
+/// annotations this is exactly shortlex on the value sequence.
+pub fn keyShortlexLess(a_keys: []const u64, a_skip: []const bool, b_keys: []const u64, b_skip: []const bool) bool {
+    const la = filteredLen(a_skip);
+    const lb = filteredLen(b_skip);
+    if (la != lb) return la < lb;
+    var ia: usize = 0;
+    var ib: usize = 0;
+    while (true) {
+        while (ia < a_keys.len and a_skip[ia]) ia += 1;
+        while (ib < b_keys.len and b_skip[ib]) ib += 1;
+        if (ia >= a_keys.len) return false;
+        if (a_keys[ia] != b_keys[ib]) return a_keys[ia] < b_keys[ib];
+        ia += 1;
+        ib += 1;
+    }
+}
+
+fn keysEqual(a_keys: []const u64, a_skip: []const bool, b_keys: []const u64, b_skip: []const bool) bool {
+    return !keyShortlexLess(a_keys, a_skip, b_keys, b_skip) and
+        !keyShortlexLess(b_keys, b_skip, a_keys, a_skip);
 }
 
 fn highestPow2(v: u64) u64 {
@@ -105,6 +139,8 @@ pub fn shrink(
     limits: Limits,
     budget: usize,
     initial: []const Choice,
+    initial_keys: []const u64,
+    initial_skips: []const bool,
     initial_display: []const u8,
 ) !ShrinkResult {
     const Inner = struct {
@@ -120,6 +156,8 @@ pub fn shrink(
         /// return the same error and be mistaken for budget control.
         exhausted: bool = false,
         best: []Choice,
+        best_keys: []u64,
+        best_skips: []bool,
         best_display: []u8,
 
         const Fail = @FieldType(AttemptResult, "fail");
@@ -144,21 +182,59 @@ pub fn shrink(
             };
         }
 
+        fn freeFail(self: *@This(), f: Fail) void {
+            self.allocator.free(f.choices);
+            self.allocator.free(f.keys);
+            self.allocator.free(f.skips);
+            self.allocator.free(f.value_display);
+        }
+
+        fn replaceBest(self: *@This(), f: Fail) void {
+            self.allocator.free(self.best);
+            self.allocator.free(self.best_keys);
+            self.allocator.free(self.best_skips);
+            self.allocator.free(self.best_display);
+            self.best = f.choices;
+            self.best_keys = f.keys;
+            self.best_skips = f.skips;
+            self.best_display = f.value_display;
+        }
+
         /// Tries one candidate value sequence; on acceptance the
         /// stored best is replaced by the re-recorded consumed
-        /// sequence. Returns whether the best changed.
+        /// sequence. Acceptance requires the candidate's key
+        /// sequence to be strictly shortlex-smaller (design §6,
+        /// v2.1). Returns whether the best changed.
         fn tryAccept(self: *@This(), values: []const u64) !bool {
             if (self.exhausted) return false;
             const f = (try self.evalCandidate(values)) orelse return false;
-            if (!shortlexLess(f.choices, self.best)) {
-                self.allocator.free(f.choices);
-                self.allocator.free(f.value_display);
+            if (!keyShortlexLess(f.keys, f.skips, self.best_keys, self.best_skips)) {
+                self.freeFail(f);
                 return false;
             }
-            self.allocator.free(self.best);
-            self.allocator.free(self.best_display);
-            self.best = f.choices;
-            self.best_display = f.value_display;
+            self.replaceBest(f);
+            return true;
+        }
+
+        /// P4 acceptance (design §6, v2.1): a lateral move that keeps
+        /// the generated value (key sequence equal) while rewriting
+        /// the integer pair starting at `pair_start` into the
+        /// full-domain class, so P3 can descend its rank. One-way:
+        /// the pair must not already be in class 3, and the
+        /// re-recorded pair must still be a pair in class 3.
+        fn tryRatchet(self: *@This(), values: []const u64, pair_start: usize) !bool {
+            if (self.exhausted) return false;
+            const f = (try self.evalCandidate(values)) orelse return false;
+            const ok = f.choices.len == self.best.len and
+                pair_start + 1 < f.choices.len and
+                f.skips[pair_start + 1] and
+                f.choices[pair_start].value == 3 and
+                keysEqual(f.keys, f.skips, self.best_keys, self.best_skips);
+            if (!ok) {
+                self.freeFail(f);
+                return false;
+            }
+            self.replaceBest(f);
             return true;
         }
 
@@ -241,18 +317,54 @@ pub fn shrink(
             return changed_any;
         }
 
+        /// P4: re-expression (design §6, v2.1). An integer pair is a
+        /// non-skip position immediately followed by a skip position
+        /// (the annotation layout of §4.1). For each pair not already
+        /// in the full-domain class, try rewriting it as
+        /// (class 3, current rank): the generated value is unchanged,
+        /// but its rank becomes reachable by P3 descent.
+        fn passReexpress(self: *@This()) !bool {
+            var changed_any = false;
+            var i: usize = 0;
+            while (i + 1 < self.best.len) : (i += 1) {
+                if (self.best_skips[i] or !self.best_skips[i + 1]) continue;
+                if (self.best[i].value == 3) continue;
+                var cand = try self.candidateValues();
+                defer cand.deinit(self.allocator);
+                cand.items[i] = 3;
+                cand.items[i + 1] = self.best_keys[i];
+                if (try self.tryRatchet(cand.items, i)) changed_any = true;
+            }
+            return changed_any;
+        }
+
         fn round(self: *@This()) !bool {
             var changed = false;
             if (try self.passChunks()) changed = true;
+            if (try self.passReexpress()) changed = true;
             if (try self.passZero()) changed = true;
             if (try self.passDecrease()) changed = true;
             return changed;
         }
     };
 
+    // Copies are made sequentially with explicit frees on the error
+    // paths: an errdefer on a value whose ownership later moves into
+    // `inner` would double-free (the M3 review lesson).
     const best_copy = try result_allocator.dupe(Choice, initial);
+    const best_keys_copy = result_allocator.dupe(u64, initial_keys) catch |err| {
+        result_allocator.free(best_copy);
+        return err;
+    };
+    const best_skips_copy = result_allocator.dupe(bool, initial_skips) catch |err| {
+        result_allocator.free(best_copy);
+        result_allocator.free(best_keys_copy);
+        return err;
+    };
     const best_display_copy = result_allocator.dupe(u8, initial_display) catch |err| {
         result_allocator.free(best_copy);
+        result_allocator.free(best_keys_copy);
+        result_allocator.free(best_skips_copy);
         return err;
     };
     var inner = Inner{
@@ -262,12 +374,16 @@ pub fn shrink(
         .limits = limits,
         .budget = budget,
         .best = best_copy,
+        .best_keys = best_keys_copy,
+        .best_skips = best_skips_copy,
         .best_display = best_display_copy,
     };
     const outcome: ShrinkOutcome = blk: {
         while (true) {
             const changed = inner.round() catch |err| {
                 result_allocator.free(inner.best);
+                result_allocator.free(inner.best_keys);
+                result_allocator.free(inner.best_skips);
                 result_allocator.free(inner.best_display);
                 return err;
             };
@@ -278,6 +394,10 @@ pub fn shrink(
             if (!changed) break :blk .fixed_point;
         }
     };
+    // Keys and skips are shrink-internal (design §6, v2.1); the
+    // result carries only the choice sequence and the display.
+    result_allocator.free(inner.best_keys);
+    result_allocator.free(inner.best_skips);
     return .{
         .choices = inner.best,
         .value_display = inner.best_display,

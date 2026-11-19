@@ -141,11 +141,15 @@ fn makeFailed(
     regression_index: ?usize,
     fail: @FieldType(shrink_mod.AttemptResult, "fail"),
 ) !Report {
-    const sr = shrink_mod.shrink(allocator, T, generator, property, config.limits, config.shrink_budget, fail.choices, fail.value_display) catch |err| {
+    const sr = shrink_mod.shrink(allocator, T, generator, property, config.limits, config.shrink_budget, fail.choices, fail.keys, fail.skips, fail.value_display) catch |err| {
         allocator.free(fail.choices);
+        allocator.free(fail.keys);
+        allocator.free(fail.skips);
         allocator.free(fail.value_display);
         return err;
     };
+    allocator.free(fail.keys);
+    allocator.free(fail.skips);
     return .{ .failed = .{
         .allocator = allocator,
         .seed = config.seed,

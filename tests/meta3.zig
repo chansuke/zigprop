@@ -129,10 +129,10 @@ test "shrink: slices shrink to a shortlex-smaller still-failing sequence" {
 // ---------------------------------------------------------------------
 
 test "shrink: initialization OOM does not leak the copied sequence" {
-    // fail_index counts allocations from 0: the choice copy is
-    // allocation 0 (succeeds), the display copy is allocation 1
-    // (fails), which must not leak the choice copy.
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    // fail_index counts allocations from 0: the copies are choices
+    // (0), keys (1), skips (2) and display (3). Failing the last one
+    // must not leak the first three.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
     const initial = [_]Choice{.{ .bound = 10, .value = 7 }};
     try std.testing.expectError(error.OutOfMemory, zigprop.shrink(
         failing.allocator(),
@@ -142,6 +142,8 @@ test "shrink: initialization OOM does not leak the copied sequence" {
         .{},
         10,
         &initial,
+        &.{7},
+        &.{false},
         "7",
     ));
 }
