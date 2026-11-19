@@ -65,7 +65,56 @@ pub const GenContext = struct {
     /// recursive occurrence and restores it on every exit path;
     /// custom generators calling back into generate share it.
     depth: usize = 0,
+
+    // Methods (design v0.3 §5.2, D28). Custom generators use these
+    // instead of reaching into the Source.
+
+    pub fn range(self: *GenContext, bound: u64) u64 {
+        return self.src.range(bound);
+    }
+
+    pub fn boolean(self: *GenContext) bool {
+        return self.src.boolean();
+    }
+
+    pub fn index(self: *GenContext, n: u64) u64 {
+        return self.src.index(n);
+    }
+
+    pub fn length(self: *GenContext, max_inclusive: usize) usize {
+        return self.src.length(max_inclusive);
+    }
+
+    /// Built-in generation, sharing depth and the element budget and
+    /// adding key annotations and spans.
+    pub fn generate(self: *GenContext, comptime T: type) anyerror!T {
+        return @import("gen.zig").generate(T, self);
+    }
+
+    /// Counts one element against the per-case budget when a custom
+    /// generator builds a slice or array itself.
+    pub fn countElement(self: *GenContext) error{InvalidGeneration}!void {
+        return @import("gen.zig").countElement(self);
+    }
 };
+
+/// Internal generation state behind a GenContext (design v0.3 §5.2):
+/// the recording Source, the generation limits, the element budget
+/// used so far and the recursion depth.
+pub const GenState = struct {
+    src: *Source,
+    limits: Limits,
+    elements_generated: usize = 0,
+    depth: usize = 0,
+};
+
+/// Builds a GenContext over `src` for zigprop's own tests and
+/// validation (internal; design v0.3 §5.2). `state` provides the
+/// storage the context points into and must outlive it.
+pub fn genContextForTest(state: *GenState, src: *Source, allocator: Allocator, limits: Limits) GenContext {
+    state.* = .{ .src = src, .limits = limits };
+    return .{ .src = src, .allocator = allocator, .limits = limits };
+}
 
 /// Derives the independent PRNG seed for one attempt (design §5).
 ///
