@@ -64,8 +64,10 @@ from the design.
 - Random-mode draw correctness (uniformity of `intRangeLessThan`
   usage), OOM paths beyond the sticky-error unit test, and replay
   exhaustion interplay are only partially tested.
-- The GitHub Actions workflows have never run (the repository is
-  local-only); action versions are pinned by tag, not by SHA.
+- The GitHub Actions workflows ran for the first time on
+  2026-11-19, after the repository went public: CI and Formal
+  verification both passed (the Benchmarks workflow is on-demand
+  and has not run yet). Actions are pinned by full commit SHA.
 - Cross-platform behaviour (macOS, 32-bit `usize` in `length`) is
   untested.
 - The v2.1 acceptance rule (key sequences, P4 re-expression) has no
