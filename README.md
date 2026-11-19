@@ -3,15 +3,18 @@
 Property-based testing for Zig, built on integrated shrinking over
 recorded choice sequences.
 
-**Status: v0.1.0 released; v0.2 in progress.** The Phase 0
+**Status: v0.2.0 released.** The Phase 0
 pre-registered validation criteria
 ([docs/design-v2.md](docs/design-v2.md) §9) are met for both
 targets: failures shrink to the exact minimal counterexample
 (2^28 for a varint decoder that stops after 4 bytes; a single run
 of length 256 for an RLE decoder that truncates run lengths to
-u8). v0.2 adds floats (f16/f32/f64), tagged unions and
-recursive types; the remaining v0.2 work is the §4 validation
-targets ([docs/design-v0.2.md](docs/design-v0.2.md) §4).
+u8). v0.2 adds floats (f16/f32/f64), tagged unions and recursive
+types, and its pre-registered validation targets
+([docs/design-v0.2.md](docs/design-v0.2.md) §4) are also met:
+the float codec target reaches the exact minimum (rank 2, the
+least positive subnormal) and the recursive-union target the
+exact structural minimum, each on all 10 registered seeds.
 [docs/verification.md](docs/verification.md) maps
 every design claim to its evidence: tests, Lean proofs, TLA+
 model checking and benchmarks.
