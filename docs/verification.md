@@ -24,6 +24,9 @@ from the design.
 | 10 | Termination | In the finite abstract model, under weak fairness on progress transitions and assuming each individual evaluation terminates, all runs reach `done` (TLC, 4 configurations). Implementation and user-callback termination are out of scope |
 | 11 | `gave_up` semantics | In the model, `gave_up` holds exactly when discards exceed the budget (`MaxDiscards + 1`) before enough valid cases; pass/fail attempts are blocked after the exceed. A `MaxDiscards = 0` configuration is checked |
 | 12 | Performance | Single-run microbenchmarks of some Source operations with pre-reserved recording capacity are recorded as a baseline (`bench/BASELINE.md`). Allocation behaviour, generators, runner and shrink performance are unmeasured |
+| 13 | Integer distribution (§4.1) | The all-zero draw sequence yields value 0 for every integer type tested (u1/i1 through u64/i64); i8 generation over 300 fixed attempts reaches all of {-128, 127, 0, -1, 1, -127, 126} (`tests/meta2.zig`). Class frequencies and uniformity are not measured |
+| 14 | Generation of composite types (§4) | Deterministic per seed and replay-faithful for a struct mixing ints, optional and slice (recorded sequences match exactly); slice lengths respect `max_len`; the element budget converts nested expansion into `error.InvalidGeneration`; enums with explicit tag values generate only named fields (`tests/meta2.zig`) |
+| 15 | Runner classification and regressions (§5, §7) | Meta tests cover: passed case counting, failure snapshot surviving the attempt arena and replaying to a failing value, same-seed reproducibility of the failure (attempt + choices), gave_up at exactly `max_discards + 1` discards, regression fail short-circuit, passing/stale regression counting, `error.InvalidConfig` rejection. The TLA+ model (rows 8–11) covers the same protocol abstractly. Shrink behaviour is milestone 3 and unverified |
 
 ## Layers
 
@@ -62,6 +65,7 @@ from the design.
   local-only); action versions are pinned by tag, not by SHA.
 - Cross-platform behaviour (macOS, 32-bit `usize` in `length`) is
   untested.
-- Generator and runner claims (§4, §5 implementation) get their rows
-  when milestones 2–3 land; `regressions.zon` schema validation
-  arrives with the runner.
+- Shrink claims (§6) get their rows when milestone 3 lands. The
+  `regressions.zon` file itself is not parsed at runtime in Phase 0
+  (entries are passed via `Config.regressions`); its schema is the
+  `Regression` struct, validated only by use in tests.
