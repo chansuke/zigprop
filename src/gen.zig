@@ -26,6 +26,7 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
     switch (@typeInfo(T)) {
         .bool => return ctx.src.boolean(),
         .int => return generateInt(T, ctx),
+        .float => return generateFloat(T, ctx),
         .@"enum" => return generateEnum(T, ctx),
         .optional => |opt| {
             if (ctx.src.boolean()) {
@@ -76,7 +77,7 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
             return result;
         },
         else => @compileError("zigprop: unsupported type " ++ @typeName(T) ++
-            " (Phase 0 generates bool, integers of 1-64 bits, enums, optionals, " ++
+            " (generates bool, integers of 1-64 bits, f16/f32/f64, enums, optionals, " ++
             "arrays, slices and structs; use checkCustom for anything else)"),
     }
 }
@@ -140,7 +141,7 @@ fn generateInt(comptime T: type, ctx: *GenContext) !T {
     const info = @typeInfo(T).int;
     if (info.bits == 0) return 0;
     if (info.bits > 64) {
-        @compileError("zigprop: integers wider than 64 bits are deferred to v0.2: " ++ @typeName(T));
+        @compileError("zigprop: integers wider than 64 bits are not supported: " ++ @typeName(T));
     }
     // Rank domain R = 2^W; the draw bound is R itself, or the sentinel
     // bound 0 when W == 64.
@@ -162,6 +163,183 @@ fn generateInt(comptime T: type, ctx: *GenContext) !T {
     // (design §4.1, v2.1).
     ctx.src.annotatePair(pair_start, rank);
     return rankToValue(T, rank);
+}
+
+// ---------------------------------------------------------------------
+// Floats (design v0.2 §1): generation happens in rank space, where
+// rank = 2a + sign and a is the magnitude bit pattern (exponent and
+// mantissa with the sign bit removed). The rank order is a
+// sign-interleaved magnitude order: within one sign it is monotone
+// in |value| (subnormals, then normals, then infinity). It is NOT
+// the numeric order across signs, and shrink only needs it to be a
+// well-founded simplicity order (design v0.2 §1.1).
+// ---------------------------------------------------------------------
+
+fn floatParts(comptime T: type) struct { bits: u16, exp_bits: u16, mant_bits: u16 } {
+    const bits: u16 = @typeInfo(T).float.bits;
+    const mant_bits: u16 = switch (bits) {
+        16 => 10,
+        32 => 23,
+        64 => 52,
+        else => unreachable,
+    };
+    return .{ .bits = bits, .exp_bits = bits - mant_bits - 1, .mant_bits = mant_bits };
+}
+
+/// NaN magnitudes (exponent all ones, mantissa nonzero) collapse to
+/// the infinity magnitude (design v0.2 §1.3): NaN makes every
+/// comparison false, so generated NaNs would fail properties for
+/// reasons unrelated to the value under test.
+fn floatCanonicalMagnitude(comptime T: type, a: u64) u64 {
+    const p = comptime floatParts(T);
+    const exp_mask: u64 = (@as(u64, 1) << @intCast(p.exp_bits)) - 1;
+    const exp = (a >> @intCast(p.mant_bits)) & exp_mask;
+    const mant_mask: u64 = (@as(u64, 1) << @intCast(p.mant_bits)) - 1;
+    if (exp == exp_mask and (a & mant_mask) != 0) {
+        return exp_mask << @intCast(p.mant_bits);
+    }
+    return a;
+}
+
+fn floatRankToValue(comptime T: type, rank: u64) T {
+    const p = comptime floatParts(T);
+    const a = floatCanonicalMagnitude(T, rank >> 1);
+    const U = @Int(.unsigned, p.bits);
+    const bits: U = @intCast((rank & 1) << @intCast(p.bits - 1) | a);
+    return @bitCast(bits);
+}
+
+fn floatValueToRank(comptime T: type, value: T) u64 {
+    const p = comptime floatParts(T);
+    const U = @Int(.unsigned, p.bits);
+    const bits: u64 = @as(U, @bitCast(value));
+    const sign = bits >> @intCast(p.bits - 1);
+    const mag_mask: u64 = (@as(u64, 1) << @intCast(p.bits - 1)) - 1;
+    const a = floatCanonicalMagnitude(T, bits & mag_mask);
+    return 2 * a + sign;
+}
+
+fn sortDedupRanks(ranks: []u64) usize {
+    // insertion sort, ascending, with duplicates removed in place
+    var len: usize = 0;
+    for (ranks) |r| {
+        var dup = false;
+        for (ranks[0..len]) |existing| {
+            if (existing == r) dup = true;
+        }
+        if (dup) continue;
+        var i = len;
+        while (i > 0 and ranks[i - 1] > r) : (i -= 1) {
+            ranks[i] = ranks[i - 1];
+        }
+        ranks[i] = r;
+        len += 1;
+    }
+    return len;
+}
+
+/// Class 0 (design v0.2 §1.2): the exact small integers -16..16 as
+/// ranks, sorted ascending (so index 0 is +0.0).
+fn floatSmallIntRanks(comptime T: type) struct { ranks: [33]u64, len: usize } {
+    @setEvalBranchQuota(100_000);
+    var ranks: [33]u64 = undefined;
+    for (0..33) |i| {
+        const k: i32 = @as(i32, @intCast(i)) - 16;
+        ranks[i] = floatValueToRank(T, @floatFromInt(k));
+    }
+    const len = sortDedupRanks(&ranks);
+    return .{ .ranks = ranks, .len = len };
+}
+
+/// Class 1 (design v0.2 §1.2): the boundary set — both signed zeros,
+/// small exact landmarks, the largest finite value, the smallest
+/// normal, the smallest subnormal and both infinities — as ranks,
+/// sorted ascending.
+fn floatBoundaryRanks(comptime T: type) struct { ranks: [14]u64, len: usize } {
+    @setEvalBranchQuota(100_000);
+    const p = comptime floatParts(T);
+    const exp_mask: u64 = (@as(u64, 1) << @intCast(p.exp_bits)) - 1;
+    const mant_mask: u64 = (@as(u64, 1) << @intCast(p.mant_bits)) - 1;
+    const bias: u64 = (@as(u64, 1) << @intCast(p.exp_bits - 1)) - 1;
+    const a_one: u64 = bias << @intCast(p.mant_bits);
+    const a_two: u64 = (bias + 1) << @intCast(p.mant_bits);
+    const a_half: u64 = (bias - 1) << @intCast(p.mant_bits);
+    const a_max_finite: u64 = ((exp_mask - 1) << @intCast(p.mant_bits)) | mant_mask;
+    const a_min_normal: u64 = @as(u64, 1) << @intCast(p.mant_bits);
+    const a_inf: u64 = exp_mask << @intCast(p.mant_bits);
+    // Candidate list (sign, magnitude): both zeros, +-1,
+    // +-2, +-0.5, +-max finite, +min normal, +min subnormal, +-inf.
+    const candidates = [14][2]u64{
+        .{ 0, 0 },            .{ 1, 0 },
+        .{ 0, a_one },        .{ 1, a_one },
+        .{ 0, a_two },        .{ 1, a_two },
+        .{ 0, a_half },       .{ 1, a_half },
+        .{ 0, a_max_finite }, .{ 1, a_max_finite },
+        .{ 0, a_min_normal }, .{ 0, 1 },
+        .{ 0, a_inf },        .{ 1, a_inf },
+    };
+    var ranks: [14]u64 = undefined;
+    for (candidates, 0..) |c, i| {
+        ranks[i] = 2 * c[1] + c[0];
+    }
+    const len = sortDedupRanks(&ranks);
+    return .{ .ranks = ranks, .len = len };
+}
+
+/// Class 2 (design v0.2 §1.2): the dyadic grid k/8 for k in
+/// -1024..1024 — exactly representable in f16/f32/f64. The ranks
+/// come out sorted by construction: magnitude grows with |k|, and
+/// for equal magnitudes the positive rank (2a) precedes the
+/// negative one (2a + 1).
+fn floatGridRanks(comptime T: type) struct { ranks: [2049]u64, len: usize } {
+    @setEvalBranchQuota(100_000);
+    var ranks: [2049]u64 = undefined;
+    ranks[0] = 0; // k = 0
+    for (1..1025) |k| {
+        const kf: T = @floatFromInt(@as(i32, @intCast(k)));
+        const v = kf / 8;
+        ranks[2 * k - 1] = floatValueToRank(T, v);
+        ranks[2 * k] = floatValueToRank(T, -v);
+    }
+    return .{ .ranks = ranks, .len = 2049 };
+}
+
+fn generateFloat(comptime T: type, ctx: *GenContext) !T {
+    const bits: u16 = @typeInfo(T).float.bits;
+    if (bits != 16 and bits != 32 and bits != 64) {
+        @compileError("zigprop: only f16, f32 and f64 are generated (f80/f128 need " ++
+            "a wider semantic key design): " ++ @typeName(T));
+    }
+    // Rank domain R = 2^bits; the draw bound is R itself, or the
+    // sentinel bound 0 when bits == 64.
+    const pair_start = ctx.src.recorded.items.len;
+    const class = ctx.src.range(4); // the class draw is always consumed
+    const rank: u64 = switch (class) {
+        0 => blk: {
+            const l = comptime floatSmallIntRanks(T);
+            const idx = ctx.src.index(l.len);
+            break :blk l.ranks[@intCast(idx)];
+        },
+        1 => blk: {
+            const l = comptime floatBoundaryRanks(T);
+            const idx = ctx.src.index(l.len);
+            break :blk l.ranks[@intCast(idx)];
+        },
+        2 => blk: {
+            const l = comptime floatGridRanks(T);
+            const idx = ctx.src.index(l.len);
+            break :blk l.ranks[@intCast(idx)];
+        },
+        else => ctx.src.range(if (bits == 64) 0 else @as(u64, 1) << @intCast(bits)),
+    };
+    const value = floatRankToValue(T, rank);
+    // The pair is annotated with the rank of the value actually
+    // produced: a drawn NaN pattern collapses to infinity, whose
+    // canonical rank differs from the drawn rank (design v0.2
+    // §1.3, MF3). Boundary-class and remapped infinities therefore
+    // share one key, and P4's "current rank" is unique.
+    ctx.src.annotatePair(pair_start, floatValueToRank(T, value));
+    return value;
 }
 
 fn generateEnum(comptime T: type, ctx: *GenContext) !T {
