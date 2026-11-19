@@ -1,0 +1,6 @@
+name = "zigprop-formal"
+version = "0.1.0"
+defaultTargets = ["ZigpropFormal"]
+
+[[lean_lib]]
+name = "ZigpropFormal"
