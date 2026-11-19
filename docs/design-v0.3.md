@@ -1141,3 +1141,31 @@ T1〜T4 は各マイルストーン（M2〜M7）の終わりに再実行し、�
 | §5.7 `regressions.zon` を誰も import しない | 残っている（D31 で解消） | grep の結果: tests/、src/、validation/ に import なし |
 | §5.8 README の「全ての設計主張を対応づける」 | 残っている | README.md:18-20 |
 | §5.9 verification.md の表の構造 | **修正済み**（行 1〜23 が一つの表になった） | verification.md:13-37 |
+
+---
+
+## Amendments
+
+### A1 (2026-11-19, directing decision after the M0/M1 implementation report)
+
+§7.4 and the M6 exit criterion say the replay pins stay unchanged, but
+replay pins record each draw's bound, and D14/D15 intentionally change
+two distributions: the integer class-2 draw's bound (65536 → R) and the
+float class draw's bound (range(4) → range(5)). Those pins therefore
+cannot stay literally unchanged. Resolution: at M6, the affected pins
+are updated with **only the bound fields changed** — values, keys,
+skips and consumed counts must stay identical, and this is verified
+mechanically (a diff of the pin files may touch nothing but the bound
+of a class draw whose distribution D14 or D15 changes). Every other
+pin stays byte-identical. This matches D16: `generator_version` tracks
+the replay meaning of normalized sequences, and a bound change with
+the same normalized value is exactly a distribution change, not a
+meaning change.
+
+### A2 (2026-11-19, recorded from the M0 measurements)
+
+T7's pre-registered prediction was wrong on the v0.2.1 baseline:
+v0.2.1 already shrinks T7 to `[7]` in 8/10 seeds, so T7's gate does
+not discriminate v0.3 from v0.2.1 on those seeds. The target and its
+gate stay as registered (no post-hoc goalpost moves); the baseline is
+recorded honestly in verification.md and the M3 report.
