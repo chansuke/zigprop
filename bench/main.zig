@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const zigprop = @import("zigprop");
-const Source = zigprop.Source;
+const Source = zigprop.internal.Source;
 
 var sink: u64 = 0;
 
@@ -16,7 +16,7 @@ fn nowNs(io: std.Io) i128 {
 }
 
 fn benchRangeRandom(io: std.Io, allocator: std.mem.Allocator, iterations: usize) !u64 {
-    var src = Source.initRandom(allocator, zigprop.deriveSeed(1, 0), std.math.maxInt(usize));
+    var src = Source.initRandom(allocator, zigprop.internal.deriveSeed(1, 0), std.math.maxInt(usize));
     defer src.deinit();
     try src.recorded.ensureTotalCapacity(allocator, iterations);
     const start = nowNs(io);
@@ -27,7 +27,7 @@ fn benchRangeRandom(io: std.Io, allocator: std.mem.Allocator, iterations: usize)
 }
 
 fn benchRangeRandomFullDomain(io: std.Io, allocator: std.mem.Allocator, iterations: usize) !u64 {
-    var src = Source.initRandom(allocator, zigprop.deriveSeed(1, 0), std.math.maxInt(usize));
+    var src = Source.initRandom(allocator, zigprop.internal.deriveSeed(1, 0), std.math.maxInt(usize));
     defer src.deinit();
     try src.recorded.ensureTotalCapacity(allocator, iterations);
     const start = nowNs(io);
@@ -39,7 +39,7 @@ fn benchRangeRandomFullDomain(io: std.Io, allocator: std.mem.Allocator, iteratio
 
 fn benchRangeReplay(io: std.Io, allocator: std.mem.Allocator, iterations: usize) !u64 {
     // Prepare a recorded sequence to replay.
-    var gen = Source.initRandom(allocator, zigprop.deriveSeed(2, 0), std.math.maxInt(usize));
+    var gen = Source.initRandom(allocator, zigprop.internal.deriveSeed(2, 0), std.math.maxInt(usize));
     defer gen.deinit();
     try gen.recorded.ensureTotalCapacity(allocator, iterations);
     for (0..iterations) |_| {
@@ -58,7 +58,7 @@ fn benchRangeReplay(io: std.Io, allocator: std.mem.Allocator, iterations: usize)
 fn benchDeriveSeed(io: std.Io, iterations: usize) !u64 {
     const start = nowNs(io);
     for (0..iterations) |i| {
-        sink +%= zigprop.deriveSeed(42, @intCast(i));
+        sink +%= zigprop.internal.deriveSeed(42, @intCast(i));
     }
     return @intCast(nowNs(io) - start);
 }

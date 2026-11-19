@@ -10,22 +10,10 @@ const shrink_mod = @import("shrink.zig");
 pub const Choice = source.Choice;
 pub const Limits = source.Limits;
 pub const GenContext = source.GenContext;
-pub const Source = source.Source;
-pub const Span = source.Span;
-pub const deriveSeed = source.deriveSeed;
 
 pub const generate = gen_mod.generate;
 pub const generator_version = gen_mod.generator_version;
 pub const max_depth_cap = gen_mod.max_depth_cap;
-
-pub const shrink = @import("shrink.zig").shrink;
-pub const ShrinkResult = @import("shrink.zig").ShrinkResult;
-pub const shrinkSpanned = @import("shrink.zig").shrinkSpanned;
-pub const ShrinkOptions = @import("shrink.zig").ShrinkOptions;
-pub const ShrinkPassMask = @import("shrink.zig").ShrinkPassMask;
-pub const ShrinkPass = @import("shrink.zig").ShrinkPass;
-pub const AcceptEvent = @import("shrink.zig").AcceptEvent;
-pub const AcceptHook = @import("shrink.zig").AcceptHook;
 
 /// Not covered by any stability promise (design v0.3 §5.6, D28): the
 /// surface zigprop's own tests and validation use.

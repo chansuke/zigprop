@@ -142,12 +142,12 @@ fn propRleCorrect(runs: []const Run) bool {
 }
 
 fn genRuns(ctx: *zigprop.GenContext) anyerror![]const Run {
-    const n = 1 + ctx.src.length(max_runs - 1); // 1..5 runs
+    const n = 1 + ctx.length(max_runs - 1); // 1..5 runs
     const runs = try ctx.allocator.alloc(Run, n);
     for (runs) |*r| {
         r.* = .{
-            .value = @intCast(ctx.src.range(256)),
-            .len = 200 + @as(u32, @intCast(ctx.src.range(101))), // 200..300
+            .value = @intCast(ctx.range(256)),
+            .len = 200 + @as(u32, @intCast(ctx.range(101))), // 200..300
         };
     }
     return runs;
@@ -371,8 +371,9 @@ fn propT7Correct(xs: []const u8) bool {
 /// Replays `choices` for T and returns the value plus its filtered key
 /// sequence (skip positions removed), arena-owned.
 fn replayWithKeys(comptime T: type, arena: std.mem.Allocator, choices: []const zigprop.Choice, limits: zigprop.Limits) !struct { value: T, keys: []u64 } {
-    var src = zigprop.Source.initReplay(arena, choices, 100_000);
-    var ctx = zigprop.GenContext{ .src = &src, .allocator = arena, .limits = limits };
+    var src = zigprop.internal.Source.initReplay(arena, choices, 100_000);
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena, limits);
     const v = try zigprop.generate(T, &ctx);
     var keys: std.ArrayList(u64) = .empty;
     for (src.recorded_keys.items, src.recorded_skip.items) |k, s| {
@@ -386,11 +387,12 @@ fn replayWithKeys(comptime T: type, arena: std.mem.Allocator, choices: []const z
 /// and spans come from replaying the sequence, which is exactly what
 /// the runner hands the shrinker. Returns the filtered keys of the
 /// shrunk sequence (arena-owned) and the shrink statistics.
-fn shrinkMasked(comptime T: type, arena: std.mem.Allocator, property: *const fn (T) bool, limits: zigprop.Limits, choices: []const zigprop.Choice, mask: zigprop.ShrinkPassMask) !struct { keys: []u64, evaluations: usize, outcome: zigprop.ShrinkOutcome } {
-    var src = zigprop.Source.initReplay(arena, choices, 100_000);
-    var ctx = zigprop.GenContext{ .src = &src, .allocator = arena, .limits = limits };
+fn shrinkMasked(comptime T: type, arena: std.mem.Allocator, property: *const fn (T) bool, limits: zigprop.Limits, choices: []const zigprop.Choice, mask: zigprop.internal.ShrinkPassMask) !struct { keys: []u64, evaluations: usize, outcome: zigprop.ShrinkOutcome } {
+    var src = zigprop.internal.Source.initReplay(arena, choices, 100_000);
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena, limits);
     _ = try zigprop.generate(T, &ctx);
-    const r = try zigprop.shrinkSpanned(arena, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", .{ .passes = mask });
+    const r = try zigprop.internal.shrinkSpanned(arena, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", .{ .passes = mask });
     const rep = try replayWithKeys(T, arena, r.choices, limits);
     return .{ .keys = rep.keys, .evaluations = r.evaluations, .outcome = r.outcome };
 }
@@ -411,27 +413,30 @@ fn writeTree(w: *std.Io.Writer, t: Tree) !void {
 }
 
 fn replayU32(allocator: std.mem.Allocator, choices: []const zigprop.Choice) !u32 {
-    var src = zigprop.Source.initReplay(allocator, choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(allocator, choices, 100_000);
     defer src.deinit();
-    var ctx = zigprop.GenContext{ .src = &src, .allocator = allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, allocator, .{});
     return zigprop.generate(u32, &ctx);
 }
 
 fn replayF32(allocator: std.mem.Allocator, choices: []const zigprop.Choice) !f32 {
-    var src = zigprop.Source.initReplay(allocator, choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(allocator, choices, 100_000);
     defer src.deinit();
-    var ctx = zigprop.GenContext{ .src = &src, .allocator = allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, allocator, .{});
     return zigprop.generate(f32, &ctx);
 }
 
 fn replayValue(allocator: std.mem.Allocator, choices: []const zigprop.Choice) !Value {
-    var src = zigprop.Source.initReplay(allocator, choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(allocator, choices, 100_000);
     defer src.deinit();
-    var ctx = zigprop.GenContext{ .src = &src, .allocator = allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, allocator, .{});
     return zigprop.generate(Value, &ctx);
 }
 
-fn filteredKeyLen(src: *zigprop.Source) usize {
+fn filteredKeyLen(src: *zigprop.internal.Source) usize {
     var n: usize = 0;
     for (src.recorded_skip.items) |skip| {
         if (!skip) n += 1;
@@ -440,9 +445,10 @@ fn filteredKeyLen(src: *zigprop.Source) usize {
 }
 
 fn replayRuns(allocator: std.mem.Allocator, choices: []const zigprop.Choice) ![]const Run {
-    var src = zigprop.Source.initReplay(allocator, choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(allocator, choices, 100_000);
     defer src.deinit();
-    var ctx = zigprop.GenContext{ .src = &src, .allocator = allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, allocator, .{});
     return genRuns(&ctx);
 }
 
@@ -610,11 +616,12 @@ pub fn main(init: std.process.Init) !void {
         var hand_found = false;
         var hand_best_keys: usize = std.math.maxInt(usize);
         for (0..200) |attempt| {
-            var src = zigprop.Source.initRandom(allocator, zigprop.deriveSeed(seed, attempt), 100_000);
+            var src = zigprop.internal.Source.initRandom(allocator, zigprop.internal.deriveSeed(seed, attempt), 100_000);
             defer src.deinit();
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
-            var ctx = zigprop.GenContext{ .src = &src, .allocator = arena.allocator(), .limits = .{} };
+            var ctx_state: zigprop.internal.GenState = undefined;
+            var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), .{});
             const v = zigprop.generate(Value, &ctx) catch continue;
             if (!propValueMutant(v)) {
                 hand_found = true;

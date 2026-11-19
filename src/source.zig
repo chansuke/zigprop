@@ -51,38 +51,34 @@ pub const Limits = struct {
     max_depth: usize = 8,
 };
 
-/// The context handed to generators (design §3, MF6).
+/// The context handed to generators (design §3, MF6; v0.3 §5.2, D28).
+/// Its only fields are the attempt allocator, a copy of the limits and
+/// the internal state; generators draw through the methods, never
+/// through the Source.
 pub const GenContext = struct {
-    src: *Source,
     /// Per-attempt arena: generated values live here and die with the attempt.
     allocator: Allocator,
+    /// Read-only copy: writing it does not change generation, which
+    /// reads the limits from the internal state.
     limits: Limits,
-    /// Array/slice elements generated so far in this attempt (design
-    /// §4, MF8). Generators increment this via gen.countElement.
-    elements_generated: usize = 0,
-    /// Current nesting depth of recursive occurrences (design
-    /// v0.2 §3.4). Generation increments it when entering a
-    /// recursive occurrence and restores it on every exit path;
-    /// custom generators calling back into generate share it.
-    depth: usize = 0,
-
-    // Methods (design v0.3 §5.2, D28). Custom generators use these
-    // instead of reaching into the Source.
+    /// Internal state (recording, depth, element budget); not covered
+    /// by any stability promise.
+    impl: *GenState,
 
     pub fn range(self: *GenContext, bound: u64) u64 {
-        return self.src.range(bound);
+        return self.impl.src.range(bound);
     }
 
     pub fn boolean(self: *GenContext) bool {
-        return self.src.boolean();
+        return self.impl.src.boolean();
     }
 
     pub fn index(self: *GenContext, n: u64) u64 {
-        return self.src.index(n);
+        return self.impl.src.index(n);
     }
 
     pub fn length(self: *GenContext, max_inclusive: usize) usize {
-        return self.src.length(max_inclusive);
+        return self.impl.src.length(max_inclusive);
     }
 
     /// Built-in generation, sharing depth and the element budget and
@@ -104,16 +100,23 @@ pub const GenContext = struct {
 pub const GenState = struct {
     src: *Source,
     limits: Limits,
+    /// Array/slice elements generated so far in this attempt (design
+    /// §4, MF8). Generators increment this via countElement.
     elements_generated: usize = 0,
+    /// Current nesting depth of recursive occurrences (design
+    /// v0.2 §3.4). Generation increments it when entering a
+    /// recursive occurrence and restores it on every exit path;
+    /// custom generators calling back into generate share it.
     depth: usize = 0,
 };
 
-/// Builds a GenContext over `src` for zigprop's own tests and
-/// validation (internal; design v0.3 §5.2). `state` provides the
-/// storage the context points into and must outlive it.
+/// Builds a GenContext over `src` (internal; design v0.3 §5.2): used
+/// by the shrinker and runner, and by zigprop's own tests and
+/// validation. `state` provides the storage the context points into
+/// and must outlive it.
 pub fn genContextForTest(state: *GenState, src: *Source, allocator: Allocator, limits: Limits) GenContext {
     state.* = .{ .src = src, .limits = limits };
-    return .{ .src = src, .allocator = allocator, .limits = limits };
+    return .{ .allocator = allocator, .limits = limits, .impl = state };
 }
 
 /// Derives the independent PRNG seed for one attempt (design §5).

@@ -109,7 +109,8 @@ pub fn evaluateAttempt(
     limits: Limits,
     exhaustion_is_discard: bool,
 ) !AttemptResult {
-    var ctx = GenContext{ .src = src, .allocator = attempt_allocator, .limits = limits };
+    var state: source.GenState = undefined;
+    var ctx = source.genContextForTest(&state, src, attempt_allocator, limits);
     const value = (if (generator) |g| g(&ctx) else gen.generate(T, &ctx)) catch |err| {
         // A sticky error (recording failure) outranks the generator's
         // own error: it is an infrastructure error (MF5, §3).

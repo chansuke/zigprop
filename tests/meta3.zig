@@ -158,7 +158,7 @@ var sticky_gen_calls: usize = 0;
 fn stickyThenDiscard(ctx: *GenContext) anyerror!u32 {
     sticky_gen_calls += 1;
     _ = ctx.range(10);
-    ctx.src.sticky_error = error.OutOfMemory; // a recording failure landed
+    ctx.impl.src.sticky_error = error.OutOfMemory; // a recording failure landed
     return error.InvalidGeneration;
 }
 

@@ -115,7 +115,7 @@ test "recursion: depth is restored on the error path" {
     var ctx_state: zigprop.internal.GenState = undefined;
     var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), .{ .max_total_elements = 2, .max_len = 4 });
     try std.testing.expectError(error.InvalidGeneration, zigprop.generate(Tree, &ctx));
-    try std.testing.expectEqual(@as(usize, 0), ctx.depth);
+    try std.testing.expectEqual(@as(usize, 0), ctx.impl.depth);
 }
 
 test "recursion: mutually recursive types generate" {

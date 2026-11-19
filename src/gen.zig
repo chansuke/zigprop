@@ -16,8 +16,8 @@ pub const generator_version: u32 = 1;
 /// (design §4, MF8). Exceeding the budget fails the generation with
 /// `error.InvalidGeneration`, which the runner classifies as discard.
 pub fn countElement(ctx: *GenContext) error{InvalidGeneration}!void {
-    ctx.elements_generated += 1;
-    if (ctx.elements_generated > ctx.limits.max_total_elements) {
+    ctx.impl.elements_generated += 1;
+    if (ctx.impl.elements_generated > ctx.impl.limits.max_total_elements) {
         return error.InvalidGeneration;
     }
 }
@@ -115,7 +115,7 @@ fn generateRec(comptime T: type, ctx: *GenContext, comptime Set: type, comptime 
     switch (@typeInfo(T)) {
         .@"struct", .@"union" => {
             if (comptime setHas(Set, T)) {
-                // n mirrors the runtime ctx.depth (one level per
+                // n mirrors the runtime ctx.impl.depth (one level per
                 // occurrence on the path); since max_depth <= cap is
                 // validated, the comptime cut at n = cap coincides
                 // with the runtime cut for every legal config.
@@ -140,26 +140,26 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
     // function scope — a defer inside the if block would run when
     // the block closes, before any field is generated.
     if (is_recursive) {
-        if (ctx.depth >= ctx.limits.max_depth) {
+        if (ctx.impl.depth >= ctx.impl.limits.max_depth) {
             return generateCut(T, ctx);
         }
-        ctx.depth += 1;
+        ctx.impl.depth += 1;
     }
     defer if (is_recursive) {
-        ctx.depth -= 1;
+        ctx.impl.depth -= 1;
     };
     switch (@typeInfo(T)) {
-        .bool => return ctx.src.boolean(),
+        .bool => return ctx.impl.src.boolean(),
         .int => return generateInt(T, ctx),
         .float => return generateFloat(T, ctx),
         .@"union" => {
-            const sp = ctx.src.beginSpan(occurrenceInfo(T));
-            defer ctx.src.endSpan(sp);
+            const sp = ctx.impl.src.beginSpan(occurrenceInfo(T));
+            defer ctx.impl.src.endSpan(sp);
             return generateUnion(T, ctx, Set, n);
         },
         .@"enum" => return generateEnum(T, ctx),
         .optional => |opt| {
-            if (ctx.src.boolean()) {
+            if (ctx.impl.src.boolean()) {
                 return try generateRec(opt.child, ctx, Set, n);
             }
             return null;
@@ -181,8 +181,8 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
                 @compileError("zigprop: sentinel-terminated slices are not supported: " ++
                     @typeName(T) ++ " (use the plain slice type instead)");
             }
-            const length_pos = ctx.src.recorded.items.len;
-            const len = ctx.src.length(ctx.limits.max_len);
+            const length_pos = ctx.impl.src.recorded.items.len;
+            const len = ctx.impl.src.length(ctx.impl.limits.max_len);
             const buf = try ctx.allocator.alloc(ptr.child, len);
             // On an element error the partial buffer is released here;
             // anything already stored inside elements (nested slices in
@@ -191,15 +191,15 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
             for (buf) |*elem| {
                 try countElement(ctx);
                 // Element span (design v0.3 §3.2): metadata only.
-                const sp = ctx.src.beginSpan(.{ .element = .{ .length_pos = length_pos } });
+                const sp = ctx.impl.src.beginSpan(.{ .element = .{ .length_pos = length_pos } });
                 elem.* = try generateRec(ptr.child, ctx, Set, n);
-                ctx.src.endSpan(sp);
+                ctx.impl.src.endSpan(sp);
             }
             return buf;
         },
         .@"struct" => |st| {
-            const sp = ctx.src.beginSpan(occurrenceInfo(T));
-            defer ctx.src.endSpan(sp);
+            const sp = ctx.impl.src.beginSpan(occurrenceInfo(T));
+            defer ctx.impl.src.endSpan(sp);
             var result: T = undefined;
             inline for (st.field_names, st.field_types, st.field_attrs) |name, F, attrs| {
                 if (attrs.@"comptime") {
@@ -257,7 +257,7 @@ fn cutExists(comptime T: type) bool {
 
 fn generateCut(comptime T: type, ctx: *GenContext) !T {
     switch (@typeInfo(T)) {
-        .bool => return ctx.src.boolean(),
+        .bool => return ctx.impl.src.boolean(),
         .int => return generateInt(T, ctx),
         .float => return generateFloat(T, ctx),
         .@"enum" => return generateEnum(T, ctx),
@@ -283,8 +283,8 @@ fn generateCut(comptime T: type, ctx: *GenContext) !T {
             return ctx.allocator.alloc(ptr.child, 0);
         },
         .@"struct" => |st| {
-            const sp = ctx.src.beginSpan(occurrenceInfo(T));
-            defer ctx.src.endSpan(sp);
+            const sp = ctx.impl.src.beginSpan(occurrenceInfo(T));
+            defer ctx.impl.src.endSpan(sp);
             var result: T = undefined;
             inline for (st.field_names, st.field_types, st.field_attrs) |name, F, attrs| {
                 if (attrs.@"comptime") {
@@ -300,8 +300,8 @@ fn generateCut(comptime T: type, ctx: *GenContext) !T {
             if (un.tag_type == null) {
                 @compileError("zigprop: untagged unions are not generated: " ++ @typeName(T));
             }
-            const sp = ctx.src.beginSpan(occurrenceInfo(T));
-            defer ctx.src.endSpan(sp);
+            const sp = ctx.impl.src.beginSpan(occurrenceInfo(T));
+            defer ctx.impl.src.endSpan(sp);
             inline for (un.field_names, un.field_types) |name, Payload| {
                 if (comptime cutExists(Payload)) {
                     if (Payload == void) {
@@ -382,22 +382,22 @@ fn generateInt(comptime T: type, ctx: *GenContext) !T {
     // Rank domain R = 2^W; the draw bound is R itself, or the sentinel
     // bound 0 when W == 64.
     const domain: u128 = @as(u128, 1) << @intCast(info.bits);
-    const pair_start = ctx.src.recorded.items.len;
-    const class = ctx.src.range(4); // the class draw is always consumed
+    const pair_start = ctx.impl.src.recorded.items.len;
+    const class = ctx.impl.src.range(4); // the class draw is always consumed
     const rank: u64 = switch (class) {
-        0 => ctx.src.range(@intCast(@min(domain, 256))),
+        0 => ctx.impl.src.range(@intCast(@min(domain, 256))),
         1 => blk: {
             const b = comptime boundaryRanks(T);
-            const idx = ctx.src.index(b.len);
+            const idx = ctx.impl.src.index(b.len);
             break :blk b.ranks[@intCast(idx)];
         },
-        2 => ctx.src.range(@intCast(@min(domain, 65536))),
-        else => ctx.src.range(if (domain == (@as(u128, 1) << 64)) 0 else @intCast(domain)),
+        2 => ctx.impl.src.range(@intCast(@min(domain, 65536))),
+        else => ctx.impl.src.range(if (domain == (@as(u128, 1) << 64)) 0 else @intCast(domain)),
     };
     // The pair (class draw, value draw) is one integer draw for shrink
     // purposes: annotate it with the value's rank as its canonical key
     // (design §4.1, v2.1).
-    ctx.src.annotatePair(pair_start, rank);
+    ctx.impl.src.annotatePair(pair_start, rank);
     return rankToValue(T, rank);
 }
 
@@ -548,25 +548,25 @@ fn generateFloat(comptime T: type, ctx: *GenContext) !T {
     }
     // Rank domain R = 2^bits; the draw bound is R itself, or the
     // sentinel bound 0 when bits == 64.
-    const pair_start = ctx.src.recorded.items.len;
-    const class = ctx.src.range(4); // the class draw is always consumed
+    const pair_start = ctx.impl.src.recorded.items.len;
+    const class = ctx.impl.src.range(4); // the class draw is always consumed
     const rank: u64 = switch (class) {
         0 => blk: {
             const l = comptime floatSmallIntRanks(T);
-            const idx = ctx.src.index(l.len);
+            const idx = ctx.impl.src.index(l.len);
             break :blk l.ranks[@intCast(idx)];
         },
         1 => blk: {
             const l = comptime floatBoundaryRanks(T);
-            const idx = ctx.src.index(l.len);
+            const idx = ctx.impl.src.index(l.len);
             break :blk l.ranks[@intCast(idx)];
         },
         2 => blk: {
             const l = comptime floatGridRanks(T);
-            const idx = ctx.src.index(l.len);
+            const idx = ctx.impl.src.index(l.len);
             break :blk l.ranks[@intCast(idx)];
         },
-        else => ctx.src.range(if (bits == 64) 0 else @as(u64, 1) << @intCast(bits)),
+        else => ctx.impl.src.range(if (bits == 64) 0 else @as(u64, 1) << @intCast(bits)),
     };
     const value = floatRankToValue(T, rank);
     // The pair is annotated with the rank of the value actually
@@ -574,7 +574,7 @@ fn generateFloat(comptime T: type, ctx: *GenContext) !T {
     // canonical rank differs from the drawn rank (design v0.2
     // §1.3, MF3). Boundary-class and remapped infinities therefore
     // share one key, and P4's "current rank" is unique.
-    ctx.src.annotatePair(pair_start, floatValueToRank(T, value));
+    ctx.impl.src.annotatePair(pair_start, floatValueToRank(T, value));
     return value;
 }
 
@@ -598,7 +598,7 @@ fn generateUnion(comptime T: type, ctx: *GenContext, comptime Set: type, comptim
     }
     // Only the named variants are generated; a non-exhaustive tag
     // enum's unnamed values never appear (the same rule as enums).
-    const idx = ctx.src.index(un.field_names.len);
+    const idx = ctx.impl.src.index(un.field_names.len);
     inline for (un.field_names, un.field_types, 0..) |name, Payload, i| {
         if (idx == i) {
             if (Payload == void) {
@@ -617,7 +617,7 @@ fn generateEnum(comptime T: type, ctx: *GenContext) !T {
     }
     // Non-exhaustive enums generate only their named fields (design §4);
     // the value used is the field's declared tag value.
-    const idx = ctx.src.index(info.field_names.len);
+    const idx = ctx.impl.src.index(info.field_names.len);
     inline for (info.field_values, 0..) |v, i| {
         if (idx == i) return @fromBackingInt(@intCast(v));
     }
