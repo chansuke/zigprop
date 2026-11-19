@@ -125,16 +125,19 @@ pub const Report = union(enum) {
 
         /// One line to paste into `tests/regressions.zon`'s `.entries`:
         /// `.{ .id = "…", .gen_version = …, .choices = .{ … } },` with
-        /// the shrunk choice values. Owned by the caller.
+        /// the shrunk choice values. The tuple is printed the way
+        /// `zig fmt` writes it (`.{}`, `.{7}`, `.{ 3, 268435456 }`), so
+        /// a pasted entry keeps the file fmt-clean. Owned by the caller.
         pub fn regressionEntry(self: *const Failed, allocator: Allocator, id: []const u8) ![]u8 {
             var out: std.Io.Writer.Allocating = .init(allocator);
             errdefer out.deinit();
             const w = &out.writer;
             try w.print(".{{ .id = \"{f}\", .gen_version = {d}, .choices = .{{", .{ std.zig.fmtString(id), gen.generator_version });
+            const multi = self.shrunk_choices.len > 1;
             for (self.shrunk_choices, 0..) |c, i| {
-                try w.print("{s}{d}", .{ if (i == 0) " " else ", ", c.value });
+                try w.print("{s}{d}", .{ if (i == 0) (if (multi) " " else "") else ", ", c.value });
             }
-            try w.writeAll(if (self.shrunk_choices.len == 0) "} }," else " } },");
+            try w.writeAll(if (multi) " } }," else "} },");
             return out.toOwnedSlice();
         }
     };

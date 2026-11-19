@@ -4,6 +4,6 @@
 .{
     .version = 1,
     .entries = .{
-        .{ .id = "m12", .gen_version = 1, .choices = .{ 10 } },
+        .{ .id = "m12", .gen_version = 1, .choices = .{10} },
     },
 }

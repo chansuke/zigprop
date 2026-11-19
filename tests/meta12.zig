@@ -227,7 +227,7 @@ test "workflow: the printed entry round-trips" {
     const entry = try r.failed.regressionEntry(std.testing.allocator, "m12");
     defer std.testing.allocator.free(entry);
     // 2. The printed form is pinned...
-    try std.testing.expectEqualStrings(".{ .id = \"m12\", .gen_version = 1, .choices = .{ 10 } },", entry);
+    try std.testing.expectEqualStrings(".{ .id = \"m12\", .gen_version = 1, .choices = .{10} },", entry);
     // ...and is exactly what tests/meta12_entry.zon has in .entries.
     const file_text = @embedFile("meta12_entry.zon");
     try std.testing.expect(std.mem.indexOf(u8, file_text, entry) != null);
@@ -256,6 +256,19 @@ test "workflow: an empty choice list prints a pasteable entry" {
     const entry = try r.failed.regressionEntry(std.testing.allocator, "a \"quoted\" id");
     defer std.testing.allocator.free(entry);
     try std.testing.expectEqualStrings(".{ .id = \"a \\\"quoted\\\" id\", .gen_version = 1, .choices = .{} },", entry);
+}
+
+test "workflow: a multi-choice entry is printed in zig fmt's tuple form" {
+    const entries = [_]zigprop.Regression{.{ .id = "m", .gen_version = zigprop.generator_version, .choices = &.{ 3, 4000000000 } }};
+    var r = try zigprop.check(std.testing.allocator, u32, smallOnly, .{ .regressions = &entries, .regression_id = "m" });
+    defer r.deinit();
+    const entry = try r.failed.regressionEntry(std.testing.allocator, "m");
+    defer std.testing.allocator.free(entry);
+    // u32 shrinks to 10 as one (class, value) pair: two choices.
+    try std.testing.expectEqual(@as(usize, 2), r.failed.shrunk_choices.len);
+    var expected_buf: [96]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, ".{{ .id = \"m\", .gen_version = {d}, .choices = .{{ {d}, {d} }} }},", .{ zigprop.generator_version, r.failed.shrunk_choices[0].value, r.failed.shrunk_choices[1].value });
+    try std.testing.expectEqualStrings(expected, entry);
 }
 
 test "zon: tests/regressions.zon imports as a RegressionFile" {
