@@ -132,7 +132,7 @@ test "shrink: initialization OOM does not leak the copied sequence" {
     // fail_index counts allocations from 0: the choice copy is
     // allocation 0 (succeeds), the display copy is allocation 1
     // (fails), which must not leak the choice copy.
-    const failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
     const initial = [_]Choice{.{ .bound = 10, .value = 7 }};
     try std.testing.expectError(error.OutOfMemory, zigprop.shrink(
         failing.allocator(),
