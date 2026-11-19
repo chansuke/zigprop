@@ -3,7 +3,7 @@
 Property-based testing for Zig, built on integrated shrinking over
 recorded choice sequences.
 
-**Status: v0.2.0 released.** The Phase 0
+**Status: v0.2.1 released.** The Phase 0
 pre-registered validation criteria
 ([docs/design-v2.md](docs/design-v2.md) §9) are met for both
 targets: failures shrink to the exact minimal counterexample
@@ -39,15 +39,17 @@ test "sorting sorts" {
 
 On failure, `checkOrError` prints the seed, the original value and
 the shrunk value, and returns `error.PropertyFailed`. Values are
-generated from the type — bool, integers, enums, optionals, arrays,
-slices and structs — and custom generators plug into `checkCustom`.
+generated from the type — bool, integers, floats (f16/f32/f64),
+enums, tagged unions, optionals, arrays, slices, structs and
+recursive types built from them — and custom generators plug into
+`checkCustom`.
 
 ## Development
 
 Milestones 1–4 (Source and primitives; comptime generation and the
 runner; shrinking; the §9 mutant validation) and the design v2.1 fix
 (rank-normalized shrink acceptance) are complete. Run the tests with
-`zig build test` (54 tests) and the validation targets with
+`zig build test` (89 tests) and the validation targets with
 `zig build validation`.
 
 - License: MIT
