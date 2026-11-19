@@ -31,6 +31,9 @@ pub const GenContext = struct {
     /// Per-attempt arena: generated values live here and die with the attempt.
     allocator: Allocator,
     limits: Limits,
+    /// Array/slice elements generated so far in this attempt (design
+    /// §4, MF8). Generators increment this via gen.countElement.
+    elements_generated: usize = 0,
 };
 
 /// Derives the independent PRNG seed for one attempt (design §5).
