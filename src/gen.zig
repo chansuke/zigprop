@@ -391,7 +391,11 @@ fn generateInt(comptime T: type, ctx: *GenContext) !T {
             const idx = ctx.impl.src.index(b.len);
             break :blk b.ranks[@intCast(idx)];
         },
-        2 => ctx.impl.src.range(@intCast(@min(domain, 65536))),
+        // Class 2 is log-uniform over the rank domain (design v0.3
+        // §2.2, D14): bound R (0 for W = 64), value = rank. Replay is
+        // `raw % R`, the same as class 3; a v1 class-2 value v <
+        // min(R, 65536) replays unchanged (§2.5).
+        2 => ctx.impl.src.rangeLogUniform(info.bits),
         else => ctx.impl.src.range(if (domain == (@as(u128, 1) << 64)) 0 else @intCast(domain)),
     };
     // The pair (class draw, value draw) is one integer draw for shrink
@@ -549,7 +553,9 @@ fn generateFloat(comptime T: type, ctx: *GenContext) !T {
     // Rank domain R = 2^bits; the draw bound is R itself, or the
     // sentinel bound 0 when bits == 64.
     const pair_start = ctx.impl.src.recorded.items.len;
-    const class = ctx.impl.src.range(4); // the class draw is always consumed
+    // Five classes since v0.3 (design §2.3, D15): class 4 is moderate
+    // magnitudes. A v1 class value c < 4 replays as c % 5 = c (§2.5).
+    const class = ctx.impl.src.range(5); // the class draw is always consumed
     const rank: u64 = switch (class) {
         0 => blk: {
             const l = comptime floatSmallIntRanks(T);
@@ -566,7 +572,11 @@ fn generateFloat(comptime T: type, ctx: *GenContext) !T {
             const idx = ctx.impl.src.index(l.len);
             break :blk l.ranks[@intCast(idx)];
         },
-        else => ctx.impl.src.range(if (bits == 64) 0 else @as(u64, 1) << @intCast(bits)),
+        3 => ctx.impl.src.range(if (bits == 64) 0 else @as(u64, 1) << @intCast(bits)),
+        // Class 4: moderate magnitudes, sampled non-uniformly in random
+        // mode; recorded and replayed exactly like class 3 (the
+        // canonical form stays class 3, so P4 ratchets 4 -> 3).
+        else => ctx.impl.src.rangeModerateFloat(bits),
     };
     const value = floatRankToValue(T, rank);
     // The pair is annotated with the rank of the value actually

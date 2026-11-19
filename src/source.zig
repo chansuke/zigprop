@@ -248,6 +248,68 @@ pub const Source = struct {
     /// In replay mode the recorded value is normalized against the
     /// requested bound (`value % bound`, or verbatim for the sentinel).
     pub fn range(self: *Source, bound: u64) u64 {
+        return self.draw(bound, .uniform);
+    }
+
+    /// Internal non-uniform draw (design v0.3 §2.2, D14, F-c): in
+    /// random mode, a log-uniform rank over `bits` bits — a width w
+    /// uniform in {0, …, bits}, then rank 0 for w = 0 and
+    /// 2^(w−1) + uniform[0, 2^(w−1)) otherwise. The recorded choice is
+    /// still one `{bound, value}` with bound 2^bits (0 for 64 bits),
+    /// and replay is exactly `range(bound)`.
+    pub fn rangeLogUniform(self: *Source, bits: u7) u64 {
+        std.debug.assert(bits >= 1 and bits <= 64);
+        const bound: u64 = if (bits == 64) 0 else @as(u64, 1) << @intCast(bits);
+        return self.draw(bound, .{ .log_uniform = bits });
+    }
+
+    /// Internal non-uniform draw (design v0.3 §2.3, D15, F-c): in
+    /// random mode, the rank of a finite normal float of moderate
+    /// magnitude — a uniform sign, an unbiased exponent uniform in
+    /// [e_min, e_max] and a uniform mantissa; rank =
+    /// 2·(((e + bias) << mant_bits) | m) + sign. The recorded choice is
+    /// one `{bound, value}` with bound 2^bits (0 for 64 bits), and
+    /// replay is exactly `range(bound)`.
+    pub fn rangeModerateFloat(self: *Source, comptime bits: u16) u64 {
+        const p: ModerateFloat = switch (bits) {
+            16 => .{ .mant_bits = 10, .exp_bits = 5, .e_min = -14, .e_max = 15 },
+            32 => .{ .mant_bits = 23, .exp_bits = 8, .e_min = -20, .e_max = 20 },
+            64 => .{ .mant_bits = 52, .exp_bits = 11, .e_min = -20, .e_max = 20 },
+            else => @compileError("zigprop: moderate floats are f16/f32/f64 only"),
+        };
+        const bound: u64 = if (bits == 64) 0 else @as(u64, 1) << @intCast(bits);
+        return self.draw(bound, .{ .moderate_float = p });
+    }
+
+    const ModerateFloat = struct { mant_bits: u6, exp_bits: u6, e_min: i32, e_max: i32 };
+
+    const Sampler = union(enum) {
+        uniform,
+        log_uniform: u7,
+        moderate_float: ModerateFloat,
+    };
+
+    fn sample(r: std.Random, bound: u64, sampler: Sampler) u64 {
+        switch (sampler) {
+            .uniform => return if (bound == 0) r.int(u64) else r.intRangeLessThan(u64, 0, bound),
+            .log_uniform => |bits| {
+                const w = r.intRangeAtMost(u64, 0, bits);
+                if (w == 0) return 0;
+                const base = @as(u64, 1) << @intCast(w - 1);
+                return base + r.intRangeLessThan(u64, 0, base);
+            },
+            .moderate_float => |p| {
+                const sign = r.intRangeLessThan(u64, 0, 2);
+                const e = r.intRangeAtMost(i32, p.e_min, p.e_max);
+                const mant = r.intRangeLessThan(u64, 0, @as(u64, 1) << p.mant_bits);
+                const bias: i32 = (@as(i32, 1) << @intCast(p.exp_bits - 1)) - 1;
+                const biased: u64 = @intCast(e + bias);
+                return 2 * ((biased << p.mant_bits) | mant) + sign;
+            },
+        }
+    }
+
+    fn draw(self: *Source, bound: u64, sampler: Sampler) u64 {
         self.draws += 1;
         if (self.limit_exceeded) {
             // The attempt is already a discard; stop recording so the
@@ -260,13 +322,7 @@ pub const Source = struct {
             return 0;
         }
         const value: u64 = switch (self.mode) {
-            .random => |*prng| blk: {
-                const r = prng.random();
-                break :blk if (bound == 0)
-                    r.int(u64)
-                else
-                    r.intRangeLessThan(u64, 0, bound);
-            },
+            .random => |*prng| sample(prng.random(), bound, sampler),
             .replay => |choices| blk: {
                 if (self.pos >= choices.len) {
                     self.exhausted = true;

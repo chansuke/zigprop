@@ -19,6 +19,10 @@
 //! list[int 0, int 0, int 0]. Gate: discovery >= 8/10 AND exact
 //! structural match >= 8/10.
 //!
+//! T5 / T5s mid-range varint over u64 / zigzag i64 (v0.3 design
+//! §8.2): gates found >= 8/10 AND minimal (2^21 / 2^20) >= 8/10,
+//! controls 10/10. T5-F (ordinary f64 values) is a measurement.
+//!
 //! T6 tree subtree promotion and T7 slice element deletion (v0.3
 //! design §8.2): gates found >= 8/10 AND minimal (keys [14, 0] /
 //! [1, 7]) >= 8/10, controls 10/10. The P6-off / P5-off ablations
@@ -401,6 +405,122 @@ fn isExpectedT4Minimum(v: Value) bool {
         if (std.meta.activeTag(item) != .int or item.int != 0) return false;
     }
     return true;
+}
+
+// ---------------------------------------------------------------------
+// T5 / T5s: mid-range varint (design v0.3 §8.2). u64 LEB128 (max 10
+// bytes); the mutant decoder ignores the 4th byte when the encoding is
+// exactly 4 bytes long, so it fails iff x in [2^21, 2^28). Expected
+// minimum: 2^21 (T5) and, through protobuf zigzag of i64, rank 2^21,
+// i.e. x = 2^20 (T5s).
+// ---------------------------------------------------------------------
+
+fn leb128Encode(x: u64, buf: *[10]u8) []const u8 {
+    var v = x;
+    var i: usize = 0;
+    while (true) {
+        var byte: u8 = @intCast(v & 0x7f);
+        v >>= 7;
+        if (v != 0) byte |= 0x80;
+        buf[i] = byte;
+        i += 1;
+        if (v == 0) break;
+    }
+    return buf[0..i];
+}
+
+fn leb128Decode(bytes: []const u8, mutant: bool) u64 {
+    var result: u64 = 0;
+    var shift: u7 = 0;
+    for (bytes, 0..) |byte, i| {
+        const ignore = mutant and bytes.len == 4 and i == 3;
+        if (!ignore) result |= @as(u64, byte & 0x7f) << @intCast(shift);
+        if (byte & 0x80 == 0) break;
+        shift += 7;
+    }
+    return result;
+}
+
+fn propT5(x: u64, mutant: bool) bool {
+    var buf: [10]u8 = undefined;
+    return leb128Decode(leb128Encode(x, &buf), mutant) == x;
+}
+
+fn propT5Mutant(x: u64) bool {
+    return propT5(x, true);
+}
+
+fn propT5Correct(x: u64) bool {
+    return propT5(x, false);
+}
+
+/// protobuf zigzag: 0 -> 0, -1 -> 1, 1 -> 2 (zigprop's rank order).
+fn zigzag(x: i64) u64 {
+    return @bitCast((x << 1) ^ (x >> 63));
+}
+
+fn unzigzag(z: u64) i64 {
+    return @as(i64, @bitCast(z >> 1)) ^ -@as(i64, @bitCast(z & 1));
+}
+
+fn propT5s(x: i64, mutant: bool) bool {
+    var buf: [10]u8 = undefined;
+    return unzigzag(leb128Decode(leb128Encode(zigzag(x), &buf), mutant)) == x;
+}
+
+fn propT5sMutant(x: i64) bool {
+    return propT5s(x, true);
+}
+
+fn propT5sCorrect(x: i64) bool {
+    return propT5s(x, false);
+}
+
+/// Counts P4 (lateral) acceptances during a shrink (T5 measurement).
+const P4Counter = struct {
+    lateral: usize = 0,
+
+    fn hook(self: *P4Counter) zigprop.internal.AcceptHook {
+        return .{ .context = self, .call = call };
+    }
+
+    fn call(context: *anyopaque, e: zigprop.internal.AcceptEvent) void {
+        const self: *P4Counter = @ptrCast(@alignCast(context));
+        if (e.lateral) self.lateral += 1;
+    }
+};
+
+/// Re-runs the shrink of `choices` with the P4 counter attached and
+/// returns the number of P4 acceptances (measurement only).
+fn countP4(comptime T: type, arena: std.mem.Allocator, property: *const fn (T) bool, choices: []const zigprop.Choice) !usize {
+    var src = zigprop.internal.Source.initReplay(arena, choices, 100_000);
+    var st: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&st, &src, arena, .{});
+    _ = try zigprop.generate(T, &ctx);
+    var counter: P4Counter = .{};
+    _ = try zigprop.internal.shrinkSpanned(arena, T, null, property, .{}, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, .{ .on_accept = counter.hook() });
+    return counter.lateral;
+}
+
+/// T5-F (measurement only): f64 over seeds 0..9 x attempts 0..199;
+/// the share with an unbiased exponent in [-20, 20] and non-zero low
+/// 20 mantissa bits.
+fn t5fOrdinary(allocator: std.mem.Allocator) !usize {
+    var hits: usize = 0;
+    for (0..10) |seed| {
+        for (0..200) |attempt| {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            var src = zigprop.internal.Source.initRandom(arena.allocator(), zigprop.internal.deriveSeed(seed, attempt), 100_000);
+            var st: zigprop.internal.GenState = undefined;
+            var ctx = zigprop.internal.genContextForTest(&st, &src, arena.allocator(), .{});
+            const x = try zigprop.generate(f64, &ctx);
+            const bits: u64 = @bitCast(x);
+            const e: i64 = @as(i64, @intCast((bits >> 52) & 0x7ff)) - 1023;
+            if (e >= -20 and e <= 20 and (bits & 0xfffff) != 0) hits += 1;
+        }
+    }
+    return hits;
 }
 
 // ---------------------------------------------------------------------
@@ -903,6 +1023,50 @@ pub fn main(init: std.process.Init) !void {
     out.print("T4 criterion (>=8 discovered AND >=8 exact): {s}\n", .{
         if (t4_discovered >= 8 and t4_exact >= 8) "MET" else "NOT MET",
     });
+
+    // ---------------- T5 / T5s ----------------
+    inline for (.{
+        .{ "T5", "u64 LEB128", u64, propT5Mutant, propT5Correct, @as(i128, 1 << 21) },
+        .{ "T5s", "i64 zigzag LEB128", i64, propT5sMutant, propT5sCorrect, @as(i128, 1 << 20) },
+    }) |t| {
+        out.print("\n== {s} mid-range varint, {s} (mutant: 4th byte of a 4-byte encoding ignored) ==\n", .{ t[0], t[1] });
+        out.print("seed | cases, shrunk value, evals, P4 acceptances\n", .{});
+        var found: usize = 0;
+        var minimal: usize = 0;
+        var ctl: usize = 0;
+        var evals_total: usize = 0;
+        var p4_total: usize = 0;
+        for (0..10) |seed| {
+            var r = try zigprop.check(allocator, t[2], t[3], .{ .seed = seed, .max_cases = 200 });
+            defer r.deinit();
+            switch (r) {
+                .failed => |f| {
+                    found += 1;
+                    var arena = std.heap.ArenaAllocator.init(allocator);
+                    defer arena.deinit();
+                    const rep = try replayWithKeys(t[2], arena.allocator(), f.shrunk_choices, .{});
+                    const is_min = @as(i128, rep.value) == t[5];
+                    if (is_min) minimal += 1;
+                    const p4 = try countP4(t[2], arena.allocator(), t[3], f.choices);
+                    evals_total += f.shrink_evaluations;
+                    p4_total += p4;
+                    out.print("{d:>4} | cases {d}, shrunk {d}{s}, evals {d}, P4 {d}\n", .{ seed, f.origin.random.attempt_index + 1, rep.value, if (is_min) " (minimal)" else "", f.shrink_evaluations, p4 });
+                },
+                else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
+            }
+            var c = try zigprop.check(allocator, t[2], t[4], .{ .seed = seed, .max_cases = 200 });
+            defer c.deinit();
+            if (std.meta.activeTag(c) == .passed) ctl += 1;
+        }
+        out.print("{s}: discovered {d}/10, minimal {d} {d}/10, control passed {d}/10\n", .{ t[0], found, t[5], minimal, ctl });
+        out.print("{s} measurements: total evals {d}, total P4 acceptances {d}; v0.2.1 (M0-e): found 0/10\n", .{ t[0], evals_total, p4_total });
+        out.print("{s} criterion (>=8 discovered AND >=8 minimal, control 10/10): {s}\n", .{ t[0], if (found >= 8 and minimal >= 8 and ctl == 10) "MET" else "NOT MET" });
+    }
+
+    // ---------------- T5-F ----------------
+    const t5f = try t5fOrdinary(allocator);
+    out.print("\n== T5-F ordinary f64 values (measurement only) ==\n", .{});
+    out.print("T5-F: v0.3 {d}/2000 with exponent in [-20, 20] and non-zero low 20 mantissa bits; v0.2.1: 8/2000 (scratch run, M6)\n", .{t5f});
 
     // ---------------- T6 ----------------
     out.print("\n== T6 tree subtree promotion (mutant: a node with value 7 is miscounted) ==\n", .{});

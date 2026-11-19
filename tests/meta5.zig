@@ -25,14 +25,18 @@ test "golden: struct { u32, i16, bool } at seed 42" {
     var ctx_state: zigprop.internal.GenState = undefined;
     var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     const v = try zigprop.generate(S, &ctx);
-    try std.testing.expectEqual(@as(u32, 22188), v.a);
-    try std.testing.expectEqual(@as(i16, -1), v.b);
+    // Re-recorded in v0.3 M6 (design v0.3 §2.6, F2): seed 42 draws a
+    // class-2 u32, now log-uniform with bound 2^32 (v0.2:
+    // {2, 22188 of 65536}, then b = -1 from the boundary class). The
+    // log-uniform draw uses two PRNG outputs, so b and c moved too.
+    try std.testing.expectEqual(@as(u32, 1409), v.a);
+    try std.testing.expectEqual(@as(i16, -88), v.b);
     try std.testing.expectEqual(true, v.c);
     try expectRecorded(&src, &.{
-        .{ .bound = 4, .value = 2 }, .{ .bound = 65536, .value = 22188 },
-        .{ .bound = 4, .value = 1 }, .{ .bound = 7, .value = 1 },
+        .{ .bound = 4, .value = 2 }, .{ .bound = 4294967296, .value = 1409 },
+        .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 175 },
         .{ .bound = 2, .value = 1 },
-    }, &.{ 22188, 22188, 1, 1, 1 }, &.{ false, true, false, true, false });
+    }, &.{ 1409, 1409, 175, 175, 1 }, &.{ false, true, false, true, false });
 }
 
 test "golden: []const u8 at seed 2 with max_len 4" {
@@ -237,17 +241,28 @@ test "floats: a passing class-0 regression is counted, not reported as a failure
     // as a pass and the run's outcome is decided by random search.
     const entries = [_]zigprop.Regression{.{ .id = "f", .gen_version = zigprop.generator_version, .choices = &.{ 0, 32 } }};
     var report = try zigprop.check(std.testing.allocator, f32, lessThanOne, .{
-        // Seed 0's first three random cases all pass (verified by
-        // scanning seeds 0..199 with max_cases = 3).
         .seed = 0,
         .max_cases = 3,
         .regressions = &entries,
         .regression_id = "f",
     });
     defer report.deinit();
-    try std.testing.expect(std.meta.activeTag(report) == .passed);
-    try std.testing.expectEqual(@as(usize, 1), report.passed.regressions.passed);
-    try std.testing.expectEqual(@as(usize, 0), report.passed.regressions.stale.len);
+    // F2 (design v0.3 §2.6, M6): this test used to assert `.passed`,
+    // relying on seed 0's first three random cases passing (found by
+    // scanning seeds), which a distribution change can silently break.
+    // The claim is about the entry only, so it is read from whichever
+    // variant the random phase ends in: the entry is counted as passed
+    // and any failure comes from random search, not from the entry.
+    const summary = switch (report) {
+        .passed => |p| p.regressions,
+        .gave_up => |g| g.regressions,
+        .failed => |f| blk: {
+            try std.testing.expect(f.origin == .random);
+            break :blk f.regressions;
+        },
+    };
+    try std.testing.expectEqual(@as(usize, 1), summary.passed);
+    try std.testing.expectEqual(@as(usize, 0), summary.stale.len);
 }
 
 fn selfSubtractIsZero(x: f64) bool {
