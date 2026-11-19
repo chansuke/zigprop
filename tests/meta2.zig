@@ -158,7 +158,7 @@ test "runner: a failure is confirmed, snapshotted and replayable" {
     defer report.deinit();
     switch (report) {
         .failed => |f| {
-            try std.testing.expectEqual(zigprop.ShrinkOutcome.not_attempted, f.shrink_outcome);
+            try std.testing.expectEqual(zigprop.ShrinkOutcome.fixed_point, f.shrink_outcome);
             try std.testing.expect(f.choices.len > 0);
             // The snapshot survives the attempt arena (report outlives
             // check) and the recorded sequence regenerates a failing
@@ -169,6 +169,12 @@ test "runner: a failure is confirmed, snapshotted and replayable" {
             const v = try zigprop.generate(u32, &ctx);
             try std.testing.expect(!smallOnly(v));
             try std.testing.expectEqualSlices(Choice, f.choices, rep.recorded.items);
+            // The shrunk sequence also regenerates a failing value.
+            var rep2 = Source.initReplay(std.testing.allocator, f.shrunk_choices, 100_000);
+            defer rep2.deinit();
+            var ctx2 = randomCtx(&rep2);
+            const v2 = try zigprop.generate(u32, &ctx2);
+            try std.testing.expect(!smallOnly(v2));
         },
         else => return error.TestUnexpectedResult,
     }
