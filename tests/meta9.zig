@@ -4,7 +4,8 @@
 const std = @import("std");
 const zigprop = @import("zigprop");
 const Choice = zigprop.Choice;
-const Span = zigprop.Span;
+const Span = zigprop.internal.Span;
+const GenState = zigprop.internal.GenState;
 
 const Tree = struct { value: i64, kids: []const Tree };
 const U = union(enum) { a: u8, b: void, c: []const u8 };
@@ -26,8 +27,9 @@ fn occ(comptime T: type, start: usize, end: usize) Span {
 fn spansOf(comptime T: type, arena: std.mem.Allocator, values: []const u64, limits: zigprop.Limits) !struct { spans: []const Span, len: usize } {
     const buf = try arena.alloc(Choice, values.len);
     for (values, buf) |v, *c| c.* = .{ .bound = 0, .value = v };
-    var src = zigprop.Source.initReplay(arena, buf, 100_000);
-    var ctx = zigprop.GenContext{ .src = &src, .allocator = arena, .limits = limits };
+    var src = zigprop.internal.Source.initReplay(arena, buf, 100_000);
+    var ctx_state: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena, limits);
     _ = try zigprop.generate(T, &ctx);
     try std.testing.expect(!src.exhausted);
     try std.testing.expectEqual(@as(?anyerror, null), src.sticky_error);
@@ -118,8 +120,9 @@ test "spans: random generation records well-formed spans" {
     defer arena.deinit();
     const a = arena.allocator();
     for (0..50) |seed| {
-        var src = zigprop.Source.initRandom(a, zigprop.deriveSeed(seed, 0), 100_000);
-        var ctx = zigprop.GenContext{ .src = &src, .allocator = a, .limits = .{ .max_len = 4, .max_depth = 3 } };
+        var src = zigprop.internal.Source.initRandom(a, zigprop.internal.deriveSeed(seed, 0), 100_000);
+        var ctx_state: GenState = undefined;
+        var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, a, .{ .max_len = 4, .max_depth = 3 });
         _ = try zigprop.generate(Tree, &ctx);
         var prev_start: usize = 0;
         for (src.recorded_spans.items) |sp| {
@@ -166,13 +169,13 @@ const Monitor = struct {
     /// Non-lateral acceptances whose keys were not strictly smaller,
     /// and lateral (P4) ones whose keys changed.
     violations: usize = 0,
-    by_pass: [@typeInfo(zigprop.ShrinkPass).@"enum".field_names.len]usize = @splat(0),
+    by_pass: [@typeInfo(zigprop.internal.ShrinkPass).@"enum".field_names.len]usize = @splat(0),
 
-    fn hook(self: *Monitor) zigprop.AcceptHook {
+    fn hook(self: *Monitor) zigprop.internal.AcceptHook {
         return .{ .context = self, .call = call };
     }
 
-    fn call(context: *anyopaque, e: zigprop.AcceptEvent) void {
+    fn call(context: *anyopaque, e: zigprop.internal.AcceptEvent) void {
         const self: *Monitor = @ptrCast(@alignCast(context));
         self.accepts += 1;
         self.by_pass[@backingInt(e.pass)] += 1;
@@ -185,7 +188,7 @@ const Monitor = struct {
         }
     }
 
-    fn count(self: *const Monitor, pass: zigprop.ShrinkPass) usize {
+    fn count(self: *const Monitor, pass: zigprop.internal.ShrinkPass) usize {
         return self.by_pass[@backingInt(pass)];
     }
 };
@@ -225,18 +228,20 @@ const Shrunk = struct {
 
 /// Replays `values` (the initial failing sequence), then shrinks it
 /// with the given internal options. Result slices are arena-owned.
-fn shrinkFrom(comptime T: type, arena: std.mem.Allocator, property: *const fn (T) bool, limits: zigprop.Limits, values: []const u64, options: zigprop.ShrinkOptions) !Shrunk {
+fn shrinkFrom(comptime T: type, arena: std.mem.Allocator, property: *const fn (T) bool, limits: zigprop.Limits, values: []const u64, options: zigprop.internal.ShrinkOptions) !Shrunk {
     const buf = try arena.alloc(Choice, values.len);
     for (values, buf) |v, *c| c.* = .{ .bound = 0, .value = v };
-    var src = zigprop.Source.initReplay(arena, buf, 100_000);
-    var ctx = GenContext{ .src = &src, .allocator = arena, .limits = limits };
+    var src = zigprop.internal.Source.initReplay(arena, buf, 100_000);
+    var ctx_state: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena, limits);
     const v = try zigprop.generate(T, &ctx);
     try std.testing.expect(!property(v));
-    const r = try zigprop.shrinkSpanned(std.testing.allocator, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", options);
+    const r = try zigprop.internal.shrinkSpanned(std.testing.allocator, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", options);
     defer std.testing.allocator.free(r.value_display);
     defer std.testing.allocator.free(r.choices);
-    var rep = zigprop.Source.initReplay(arena, r.choices, 100_000);
-    var rctx = GenContext{ .src = &rep, .allocator = arena, .limits = limits };
+    var rep = zigprop.internal.Source.initReplay(arena, r.choices, 100_000);
+    var rctx_state: GenState = undefined;
+    var rctx = zigprop.internal.genContextForTest(&rctx_state, &rep, arena, limits);
     _ = try zigprop.generate(T, &rctx);
     var keys: std.ArrayList(u64) = .empty;
     for (rep.recorded_keys.items, rep.recorded_skip.items) |k, s| {
@@ -273,9 +278,9 @@ test "shrink: subtree promotion lifts a deeply nested failing node" {
 fn tripleGen(ctx: *GenContext) anyerror![]const [3]u8 {
     var list: std.ArrayList([3]u8) = .empty;
     while (true) {
-        const v: u8 = @intCast(ctx.src.range(256));
+        const v: u8 = @intCast(ctx.range(256));
         if (v == 0) break;
-        try list.append(ctx.allocator, .{ v, @intCast(ctx.src.range(256)), @intCast(ctx.src.range(256)) });
+        try list.append(ctx.allocator, .{ v, @intCast(ctx.range(256)), @intCast(ctx.range(256)) });
     }
     return list.toOwnedSlice(ctx.allocator);
 }
@@ -363,7 +368,7 @@ test "shrink: the internal pass mask disables passes" {
     try std.testing.expectEqualSlices(u64, &.{ 0, 1, 14, 0 }, s61.keys);
 
     // Everything off: no candidate is evaluated, the input is a fixed point.
-    const off: zigprop.ShrinkPassMask = .{ .p1 = false, .p1b = false, .p2 = false, .p3 = false, .p4 = false, .p5 = false, .p6 = false };
+    const off: zigprop.internal.ShrinkPassMask = .{ .p1 = false, .p1b = false, .p2 = false, .p3 = false, .p4 = false, .p5 = false, .p6 = false };
     const s0 = try shrinkFrom(Tree, a, noSevenTree, .{}, &tree, .{ .passes = off });
     try std.testing.expectEqual(@as(usize, 0), s0.evaluations);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.fixed_point, s0.outcome);
@@ -377,10 +382,11 @@ test "shrink: budget exhaustion stops the new passes early" {
     const a = arena.allocator();
     const buf = try a.alloc(Choice, 7);
     for ([_]u64{ 3, 0, 1, 0, 7, 0, 3 }, buf) |v, *c| c.* = .{ .bound = 0, .value = v };
-    var src = zigprop.Source.initReplay(a, buf, 100_000);
-    var ctx = GenContext{ .src = &src, .allocator = a, .limits = .{} };
+    var src = zigprop.internal.Source.initReplay(a, buf, 100_000);
+    var ctx_state: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, a, .{});
     _ = try zigprop.generate([]const u8, &ctx);
-    const r = try zigprop.shrinkSpanned(std.testing.allocator, []const u8, null, noSevenBytes, .{}, 1, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", .{});
+    const r = try zigprop.internal.shrinkSpanned(std.testing.allocator, []const u8, null, noSevenBytes, .{}, 1, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", .{});
     defer std.testing.allocator.free(r.value_display);
     defer std.testing.allocator.free(r.choices);
     try std.testing.expectEqual(@as(usize, 1), r.evaluations);

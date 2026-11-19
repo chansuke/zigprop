@@ -57,11 +57,12 @@ fn generateWith(comptime T: type, arena: std.mem.Allocator, mode: union(enum) { 
         .replay => |values| blk: {
             const buf = try arena.alloc(Choice, values.len);
             for (values, buf) |v, *c| c.* = .{ .bound = 0, .value = v };
-            break :blk zigprop.Source.initReplay(arena, buf, 100_000);
+            break :blk zigprop.internal.Source.initReplay(arena, buf, 100_000);
         },
-        .seed => |seed| zigprop.Source.initRandom(arena, zigprop.deriveSeed(seed, 0), 100_000),
+        .seed => |seed| zigprop.internal.Source.initRandom(arena, zigprop.internal.deriveSeed(seed, 0), 100_000),
     };
-    var ctx = zigprop.GenContext{ .src = &src, .allocator = arena, .limits = limits };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena, limits);
     const v = try zigprop.generate(T, &ctx);
     try std.testing.expect(!src.exhausted);
     return .{
