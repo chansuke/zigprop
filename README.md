@@ -9,10 +9,10 @@ pre-registered validation criteria
 targets: failures shrink to the exact minimal counterexample
 (2^28 for a varint decoder that stops after 4 bytes; a single run
 of length 256 for an RLE decoder that truncates run lengths to
-u8). v0.2 adds floats (f16/f32/f64) and tagged unions so far;
-recursive types are designed in
-[docs/design-v0.2.md](docs/design-v0.2.md) but not yet
-implemented. [docs/verification.md](docs/verification.md) maps
+u8). v0.2 adds floats (f16/f32/f64), tagged unions and
+recursive types; the remaining v0.2 work is the §4 validation
+targets ([docs/design-v0.2.md](docs/design-v0.2.md) §4).
+[docs/verification.md](docs/verification.md) maps
 every design claim to its evidence: tests, Lean proofs, TLA+
 model checking and benchmarks.
 
