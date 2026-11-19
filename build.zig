@@ -25,6 +25,18 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(meta_tests).step);
 
+    for ([_][]const u8{ "tests/meta2.zig", "tests/examples.zig" }) |path| {
+        const extra_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(path),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zigprop", .module = mod }},
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(extra_tests).step);
+    }
+
     // Benchmark / profiling harness (bench/main.zig). Both the harness
     // and the library module it measures are ReleaseFast, regardless of
     // the global -Doptimize setting.
