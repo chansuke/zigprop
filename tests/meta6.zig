@@ -86,7 +86,7 @@ test "unions: key count beats declaration order (MF4)" {
     });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
-    try std.testing.expect(report.failed.regression_index != null);
+    try std.testing.expect(report.failed.origin == .regression);
     try std.testing.expectEqual(@as(usize, 1), report.failed.shrunk_choices.len);
     var src = zigprop.internal.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
     defer src.deinit();
@@ -113,7 +113,7 @@ test "unions: the tag index breaks ties between equal key counts" {
     });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
-    try std.testing.expect(report.failed.regression_index != null);
+    try std.testing.expect(report.failed.origin == .regression);
     var src = zigprop.internal.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
     defer src.deinit();
     var ctx_state: zigprop.internal.GenState = undefined;

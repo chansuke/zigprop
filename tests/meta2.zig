@@ -198,7 +198,7 @@ test "runner: same seed reproduces the same failure" {
     defer r1.deinit();
     var r2 = try zigprop.check(std.testing.allocator, u32, smallOnly, .{ .seed = 9, .max_cases = 100 });
     defer r2.deinit();
-    try std.testing.expectEqual(r1.failed.attempt_index, r2.failed.attempt_index);
+    try std.testing.expectEqual(r1.failed.origin.random.attempt_index, r2.failed.origin.random.attempt_index);
     try std.testing.expectEqualSlices(Choice, r1.failed.choices, r2.failed.choices);
     try std.testing.expectEqualStrings(r1.failed.original_value, r2.failed.original_value);
 }
@@ -261,7 +261,7 @@ test "regressions: a failing entry fails the run before random cases" {
     defer report.deinit();
     switch (report) {
         .failed => |f| {
-            try std.testing.expectEqual(@as(?usize, 0), f.regression_index);
+            try std.testing.expectEqual(@as(usize, 0), f.origin.regression.index);
             try std.testing.expectEqual(@as(u64, 25), f.choices[0].value);
         },
         else => return error.TestUnexpectedResult,
@@ -283,8 +283,10 @@ test "regressions: passing entries are counted, stale versions skipped" {
     defer report.deinit();
     switch (report) {
         .passed => |p| {
-            try std.testing.expectEqual(@as(usize, 1), p.regressions_passed);
-            try std.testing.expectEqual(@as(usize, 1), p.stale_regressions);
+            try std.testing.expectEqual(@as(usize, 1), p.regressions.passed);
+            try std.testing.expectEqual(@as(usize, 1), p.regressions.stale.len);
+            try std.testing.expectEqual(zigprop.StaleReason.gen_version_mismatch, p.regressions.stale[0].reason);
+            try std.testing.expectEqual(@as(usize, 1), p.regressions.stale[0].index);
         },
         else => return error.TestUnexpectedResult,
     }

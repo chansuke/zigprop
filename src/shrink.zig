@@ -1,6 +1,8 @@
 //! Shrinking (design §6) and the shared attempt evaluator (§5, MF5).
 //!
-//! The predicate is P(C) = "replaying the choice sequence C fails".
+//! The predicate is P(C) = "replaying the choice sequence C fails
+//! with the same Failure kind as the original" (design v0.3 §5.4,
+//! D27; for a bool property the kind is always `returned_false`).
 //! A candidate is accepted only when the key sequence of its
 //! *re-recorded consumed* sequence is strictly shortlex-smaller
 //! than the stored best (MF2, v2.1: keys are canonical — an integer
@@ -63,7 +65,77 @@ pub const AcceptEvent = struct {
     before_skips: []const bool,
     after_keys: []const u64,
     after_skips: []const bool,
+    /// The failure kind of the accepted candidate (design v0.3 §5.4:
+    /// always equal to the original failure's kind).
+    failure: Failure,
 };
+
+// ---------------------------------------------------------------------
+// Properties, cases and failure kinds (design v0.3 §5.2-§5.4, D27)
+// ---------------------------------------------------------------------
+
+/// Per-attempt information handed to a property. Passed by pointer so
+/// later versions can add fields without changing the signature.
+pub const Case = struct {
+    /// The attempt arena (same lifetime as the generated value); use it
+    /// for the system under test's scratch memory.
+    allocator: Allocator,
+};
+
+/// The kind of a failure. Shrinking keeps it (D27): a candidate is
+/// accepted only when it fails with an equal Failure.
+pub const Failure = union(enum) {
+    returned_false,
+    /// Any error the property returned, whatever its name (§5.3).
+    returned_error: anyerror,
+
+    pub fn eql(a: Failure, b: Failure) bool {
+        return switch (a) {
+            .returned_false => b == .returned_false,
+            .returned_error => |ea| switch (b) {
+                .returned_error => |eb| ea == eb,
+                .returned_false => false,
+            },
+        };
+    }
+};
+
+pub fn Generator(comptime T: type) type {
+    return *const fn (gen: *GenContext) anyerror!T;
+}
+
+pub fn GeneratorWith(comptime Ctx: type, comptime T: type) type {
+    return *const fn (ctx: Ctx, gen: *GenContext) anyerror!T;
+}
+
+pub fn PropertyWith(comptime Ctx: type, comptime T: type) type {
+    return *const fn (ctx: Ctx, case: *Case, value: T) anyerror!bool;
+}
+
+/// Adapts a plain `fn (T) bool` property to the general form; the
+/// context is the property itself (design v0.3 §5.2).
+pub fn BoolProperty(comptime T: type) type {
+    return struct {
+        pub const Ctx = *const fn (T) bool;
+        pub fn property(p: Ctx, _: *Case, value: T) anyerror!bool {
+            return p(value);
+        }
+    };
+}
+
+/// Adapts `checkCustom`'s pair (generator, plain property) to the
+/// general form; the context carries both function pointers.
+pub fn CustomProperty(comptime T: type) type {
+    return struct {
+        pub const Ctx = struct { property: *const fn (T) bool, generator: Generator(T) };
+        pub fn property(c: Ctx, _: *Case, value: T) anyerror!bool {
+            return c.property(value);
+        }
+        pub fn generator(c: Ctx, g: *GenContext) anyerror!T {
+            return c.generator(g);
+        }
+    };
+}
 
 pub const AcceptHook = struct {
     context: *anyopaque,
@@ -89,29 +161,33 @@ pub const AttemptResult = union(enum) {
         /// Span annotations of the consumed sequence, result-owned
         /// (design v0.3 §3.2, D18). Metadata only.
         spans: []Span,
-        /// Display snapshot of the failing value, result-owned.
-        value_display: []u8,
+        /// The failure kind (design v0.3 §5.4).
+        failure: Failure,
     },
 };
 
 /// Runs one generation + property evaluation against a prepared
 /// Source and classifies the outcome (design §5, MF5). On a
-/// confirmed failure the consumed sequence and a display snapshot
-/// are copied into result-owned storage before the attempt arena
-/// dies (MF9).
+/// confirmed failure the consumed sequence is copied into
+/// result-owned storage before the attempt arena dies (MF9). No
+/// display is formatted here: the runner regenerates it from the
+/// final sequences (design v0.3 §5.5). A property error is a failure
+/// (`returned_error`) whatever its name; it never propagates (§5.3).
 pub fn evaluateAttempt(
     result_allocator: Allocator,
     comptime T: type,
-    generator: ?*const fn (*GenContext) anyerror!T,
-    property: *const fn (T) bool,
+    comptime Ctx: type,
+    ctx: Ctx,
+    generator: ?GeneratorWith(Ctx, T),
+    property: PropertyWith(Ctx, T),
     src: *Source,
     attempt_allocator: Allocator,
     limits: Limits,
     exhaustion_is_discard: bool,
 ) !AttemptResult {
     var state: source.GenState = undefined;
-    var ctx = source.genContextForTest(&state, src, attempt_allocator, limits);
-    const value = (if (generator) |g| g(&ctx) else gen.generate(T, &ctx)) catch |err| {
+    var gctx = source.genContextForTest(&state, src, attempt_allocator, limits);
+    const value = (if (generator) |g| g(ctx, &gctx) else gen.generate(T, &gctx)) catch |err| {
         // A sticky error (recording failure) outranks the generator's
         // own error: it is an infrastructure error (MF5, §3).
         if (src.sticky_error) |serr| return serr;
@@ -126,7 +202,12 @@ pub fn evaluateAttempt(
     // its re-recorded consumed sequence (padding included) is what
     // the acceptance rule compares (§6).
     if (src.exhausted and exhaustion_is_discard) return .discard;
-    if (property(value)) return .pass;
+    var case: Case = .{ .allocator = attempt_allocator };
+    const failure: Failure = blk: {
+        const ok = property(ctx, &case, value) catch |err| break :blk .{ .returned_error = err };
+        if (ok) return .pass;
+        break :blk .returned_false;
+    };
     const choices = try result_allocator.dupe(Choice, src.recorded.items);
     errdefer result_allocator.free(choices);
     const keys = try result_allocator.dupe(u64, src.recorded_keys.items);
@@ -134,16 +215,12 @@ pub fn evaluateAttempt(
     const skips = try result_allocator.dupe(bool, src.recorded_skip.items);
     errdefer result_allocator.free(skips);
     const spans = try result_allocator.dupe(Span, src.recorded_spans.items);
-    errdefer result_allocator.free(spans);
-    const display = try std.fmt.allocPrint(result_allocator, "{any}", .{value});
-    return .{ .fail = .{ .choices = choices, .keys = keys, .skips = skips, .spans = spans, .value_display = display } };
+    return .{ .fail = .{ .choices = choices, .keys = keys, .skips = skips, .spans = spans, .failure = failure } };
 }
 
 pub const ShrinkResult = struct {
     /// The shrunk consumed sequence, owned by the result allocator.
     choices: []Choice,
-    /// Display snapshot of the shrunk value, result-owned.
-    value_display: []u8,
     evaluations: usize,
     outcome: ShrinkOutcome,
 };
@@ -186,29 +263,28 @@ fn highestPow2(v: u64) u64 {
     return @as(u64, 1) << @intCast(63 - @clz(v));
 }
 
+/// Shrinks a `returned_false` failure of a plain `fn (T) bool`
+/// property, starting without spans (internal convenience form).
 pub fn shrink(
     result_allocator: Allocator,
     comptime T: type,
-    generator: ?*const fn (*GenContext) anyerror!T,
+    generator: ?Generator(T),
     property: *const fn (T) bool,
     limits: Limits,
     budget: usize,
     initial: []const Choice,
     initial_keys: []const u64,
     initial_skips: []const bool,
-    initial_display: []const u8,
 ) !ShrinkResult {
-    return shrinkSpanned(result_allocator, T, generator, property, limits, budget, initial, initial_keys, initial_skips, &.{}, initial_display, .{});
+    return shrinkSpanned(result_allocator, T, generator, property, limits, budget, initial, initial_keys, initial_skips, &.{}, .{});
 }
 
 /// `shrink` with the initial sequence's span annotations (design
 /// v0.3 §3.2) and the internal options (pass mask, acceptance hook).
-/// The runner uses this form with default options; spans are
-/// metadata and never affect acceptance.
 pub fn shrinkSpanned(
     result_allocator: Allocator,
     comptime T: type,
-    generator: ?*const fn (*GenContext) anyerror!T,
+    generator: ?Generator(T),
     property: *const fn (T) bool,
     limits: Limits,
     budget: usize,
@@ -216,13 +292,43 @@ pub fn shrinkSpanned(
     initial_keys: []const u64,
     initial_skips: []const bool,
     initial_spans: []const Span,
-    initial_display: []const u8,
+    options: ShrinkOptions,
+) !ShrinkResult {
+    if (generator) |g| {
+        const C = CustomProperty(T);
+        return shrinkWith(result_allocator, T, C.Ctx, .{ .property = property, .generator = g }, C.generator, C.property, .returned_false, limits, budget, initial, initial_keys, initial_skips, initial_spans, options);
+    }
+    const B = BoolProperty(T);
+    return shrinkWith(result_allocator, T, B.Ctx, property, null, B.property, .returned_false, limits, budget, initial, initial_keys, initial_skips, initial_spans, options);
+}
+
+/// The general shrinker (design §6, v0.3 §3): P(C) = "replaying C
+/// fails with a Failure equal to `failure`" (D27). The runner uses
+/// this form with default options; spans are metadata and never
+/// affect acceptance.
+pub fn shrinkWith(
+    result_allocator: Allocator,
+    comptime T: type,
+    comptime Ctx: type,
+    ctx: Ctx,
+    generator: ?GeneratorWith(Ctx, T),
+    property: PropertyWith(Ctx, T),
+    failure: Failure,
+    limits: Limits,
+    budget: usize,
+    initial: []const Choice,
+    initial_keys: []const u64,
+    initial_skips: []const bool,
+    initial_spans: []const Span,
     options: ShrinkOptions,
 ) !ShrinkResult {
     const Inner = struct {
         allocator: Allocator,
-        generator: ?*const fn (*GenContext) anyerror!T,
-        property: *const fn (T) bool,
+        ctx: Ctx,
+        generator: ?GeneratorWith(Ctx, T),
+        property: PropertyWith(Ctx, T),
+        /// The original failure kind every acceptance must keep.
+        failure: Failure,
         limits: Limits,
         budget: usize,
         options: ShrinkOptions,
@@ -238,7 +344,6 @@ pub fn shrinkSpanned(
         /// Spans of the best sequence (design v0.3 §3.2); replaced
         /// together with it on every acceptance.
         best_spans: []Span,
-        best_display: []u8,
 
         const Fail = @FieldType(AttemptResult, "fail");
 
@@ -255,11 +360,20 @@ pub fn shrinkSpanned(
             for (values, replay) |v, *c| c.* = .{ .bound = 0, .value = v };
             var src = Source.initReplay(aa, replay, self.limits.max_draws);
             defer src.deinit();
-            const result = try evaluateAttempt(self.allocator, T, self.generator, self.property, &src, aa, self.limits, false);
-            return switch (result) {
-                .fail => |f| f,
-                else => null,
-            };
+            const result = try evaluateAttempt(self.allocator, T, Ctx, self.ctx, self.generator, self.property, &src, aa, self.limits, false);
+            switch (result) {
+                .fail => |f| {
+                    // P(C) is "fails with the same kind" (design v0.3
+                    // §5.4, D27). Checking it here covers every
+                    // acceptance path, P4's lateral move included.
+                    if (!f.failure.eql(self.failure)) {
+                        self.freeFail(f);
+                        return null;
+                    }
+                    return f;
+                },
+                else => return null,
+            }
         }
 
         fn freeFail(self: *@This(), f: Fail) void {
@@ -267,7 +381,6 @@ pub fn shrinkSpanned(
             self.allocator.free(f.keys);
             self.allocator.free(f.skips);
             self.allocator.free(f.spans);
-            self.allocator.free(f.value_display);
         }
 
         fn replaceBest(self: *@This(), f: Fail) void {
@@ -275,12 +388,10 @@ pub fn shrinkSpanned(
             self.allocator.free(self.best_keys);
             self.allocator.free(self.best_skips);
             self.allocator.free(self.best_spans);
-            self.allocator.free(self.best_display);
             self.best = f.choices;
             self.best_keys = f.keys;
             self.best_skips = f.skips;
             self.best_spans = f.spans;
-            self.best_display = f.value_display;
         }
 
         /// Tries one candidate value sequence; on acceptance the
@@ -313,6 +424,7 @@ pub fn shrinkSpanned(
                 .before_skips = self.best_skips,
                 .after_keys = f.keys,
                 .after_skips = f.skips,
+                .failure = f.failure,
             });
         }
 
@@ -622,23 +734,18 @@ pub fn shrinkSpanned(
         result_allocator.free(best_keys_copy);
         return err;
     };
-    const best_display_copy = result_allocator.dupe(u8, initial_display) catch |err| {
-        result_allocator.free(best_copy);
-        result_allocator.free(best_keys_copy);
-        result_allocator.free(best_skips_copy);
-        return err;
-    };
     const best_spans_copy = result_allocator.dupe(Span, initial_spans) catch |err| {
         result_allocator.free(best_copy);
         result_allocator.free(best_keys_copy);
         result_allocator.free(best_skips_copy);
-        result_allocator.free(best_display_copy);
         return err;
     };
     var inner = Inner{
         .allocator = result_allocator,
+        .ctx = ctx,
         .generator = generator,
         .property = property,
+        .failure = failure,
         .limits = limits,
         .budget = budget,
         .options = options,
@@ -646,7 +753,6 @@ pub fn shrinkSpanned(
         .best_keys = best_keys_copy,
         .best_skips = best_skips_copy,
         .best_spans = best_spans_copy,
-        .best_display = best_display_copy,
     };
     const outcome: ShrinkOutcome = blk: {
         while (true) {
@@ -655,7 +761,6 @@ pub fn shrinkSpanned(
                 result_allocator.free(inner.best_keys);
                 result_allocator.free(inner.best_skips);
                 result_allocator.free(inner.best_spans);
-                result_allocator.free(inner.best_display);
                 return err;
             };
             // Budget exhaustion outranks fixed_point: a round only
@@ -665,14 +770,14 @@ pub fn shrinkSpanned(
             if (!changed) break :blk .fixed_point;
         }
     };
-    // Keys and skips are shrink-internal (design §6, v2.1); the
-    // result carries only the choice sequence and the display.
+    // Keys, skips and spans are shrink-internal (design §6, v2.1); the
+    // result carries only the choice sequence. The display is
+    // regenerated by the runner (design v0.3 §5.5).
     result_allocator.free(inner.best_keys);
     result_allocator.free(inner.best_skips);
     result_allocator.free(inner.best_spans);
     return .{
         .choices = inner.best,
-        .value_display = inner.best_display,
         .evaluations = inner.evaluations,
         .outcome = outcome,
     };

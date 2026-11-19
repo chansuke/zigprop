@@ -24,6 +24,13 @@
 //! [1, 7]) >= 8/10, controls 10/10. The P6-off / P5-off ablations
 //! and the v0.2.1 baseline (M0-e) are measurements only.
 //!
+//! T9 / T9e (v0.3 design §8.2): T4 written with checkWith (codec as
+//! context, case.allocator, no globals). T9 gates: found >= 8/10 AND
+//! structure >= 8/10 AND per-seed shrunk choices identical to T4's
+//! AND zero leaks under DebugAllocator. T9e: the decoder returns
+//! error.UnexpectedLength; the failure must be reported with that
+//! kind and keep it on every shrink acceptance (internal hook).
+//!
 //! Success criterion (registered in advance): for each target, at
 //! least 8 of seeds 0..9 discover a failure within max_cases = 200
 //! AND shrink to the expected minimal counterexample. A hand-written
@@ -293,6 +300,101 @@ fn propValueCorrect(v: Value) bool {
     return propValue(v, false);
 }
 
+// ---------------------------------------------------------------------
+// T9 / T9e: the T4 codec through checkWith (design v0.3 §8.2). The
+// codec configuration is the property's context; encoding and
+// decoding use the per-case allocator. There is no container-level
+// buffer for T9 (gate 4): every byte lives in `case.allocator`.
+// ---------------------------------------------------------------------
+
+const Codec = struct {
+    mode: Mode,
+
+    const Mode = enum {
+        correct,
+        /// T4's mutant: every list is truncated to its first 2 elements.
+        truncate,
+        /// T9e: lists of 3 or more elements are rejected with an error.
+        reject,
+    };
+
+    fn encodeAlloc(_: *const Codec, a: std.mem.Allocator, v: Value) ![]u8 {
+        var list: std.ArrayList(u8) = .empty;
+        try encodeList(&list, a, v);
+        return list.items;
+    }
+
+    fn encodeList(list: *std.ArrayList(u8), a: std.mem.Allocator, v: Value) !void {
+        switch (v) {
+            .int => |n| {
+                try list.append(a, 0);
+                var b: [8]u8 = undefined;
+                std.mem.writeInt(i64, &b, n, .little);
+                try list.appendSlice(a, &b);
+            },
+            .str => |s| {
+                try list.append(a, 1);
+                var b: [4]u8 = undefined;
+                std.mem.writeInt(u32, &b, @intCast(s.len), .little);
+                try list.appendSlice(a, &b);
+                try list.appendSlice(a, s);
+            },
+            .list => |items| {
+                try list.append(a, 2);
+                var b: [4]u8 = undefined;
+                std.mem.writeInt(u32, &b, @intCast(items.len), .little);
+                try list.appendSlice(a, &b);
+                for (items) |item| try encodeList(list, a, item);
+            },
+        }
+    }
+
+    fn decode(self: *const Codec, a: std.mem.Allocator, bytes: []const u8) !Value {
+        var pos: usize = 0;
+        return switch (self.mode) {
+            .correct => decodeValue(bytes, &pos, a, false),
+            .truncate => decodeValue(bytes, &pos, a, true),
+            .reject => decodeRejecting(bytes, &pos, a),
+        };
+    }
+
+    fn decodeRejecting(bytes: []const u8, pos: *usize, a: std.mem.Allocator) !Value {
+        if (bytes[pos.*] == 2) {
+            const n = std.mem.readInt(u32, bytes[pos.* + 1 ..][0..4], .little);
+            if (n >= 3) return error.UnexpectedLength;
+            pos.* += 5;
+            const items = try a.alloc(Value, n);
+            for (items) |*item| item.* = try decodeRejecting(bytes, pos, a);
+            return .{ .list = items };
+        }
+        return decodeValue(bytes, pos, a, false);
+    }
+};
+
+fn propT9(codec: *const Codec, case: *zigprop.Case, v: Value) anyerror!bool {
+    const enc = try codec.encodeAlloc(case.allocator, v);
+    const dec = try codec.decode(case.allocator, enc); // an error is a failure (§5.3)
+    return valueEql(v, dec);
+}
+
+/// Internal acceptance hook for T9e: counts acceptances whose failure
+/// kind differs from the expected one (design v0.3 §3.9, §8.2 T9e).
+const KindMonitor = struct {
+    expected: zigprop.Failure,
+    accepts: usize = 0,
+    violations: usize = 0,
+
+    fn hook(self: *KindMonitor) zigprop.internal.AcceptHook {
+        return .{ .context = self, .call = call };
+    }
+
+    fn call(context: *anyopaque, e: zigprop.internal.AcceptEvent) void {
+        const self: *KindMonitor = @ptrCast(@alignCast(context));
+        self.accepts += 1;
+        if (!e.failure.eql(self.expected)) self.violations += 1;
+    }
+};
+
 fn isExpectedT4Minimum(v: Value) bool {
     if (std.meta.activeTag(v) != .list or v.list.len != 3) return false;
     for (v.list) |item| {
@@ -392,7 +494,7 @@ fn shrinkMasked(comptime T: type, arena: std.mem.Allocator, property: *const fn 
     var ctx_state: zigprop.internal.GenState = undefined;
     var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena, limits);
     _ = try zigprop.generate(T, &ctx);
-    const r = try zigprop.internal.shrinkSpanned(arena, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", .{ .passes = mask });
+    const r = try zigprop.internal.shrinkSpanned(arena, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, .{ .passes = mask });
     const rep = try replayWithKeys(T, arena, r.choices, limits);
     return .{ .keys = rep.keys, .evaluations = r.evaluations, .outcome = r.outcome };
 }
@@ -486,7 +588,7 @@ pub fn main(init: std.process.Init) !void {
                 const exact = shrunk == 268435456;
                 if (exact) t1_exact += 1;
                 out.print("{d:>4} | cases {d}, shrunk {d}{s}, evals {d} | hand: {s}, {d}\n", .{
-                    seed,                                     f.attempt_index + 1, shrunk, if (exact) " (exact)" else "", f.shrink_evaluations,
+                    seed,                                     f.origin.random.attempt_index + 1, shrunk, if (exact) " (exact)" else "", f.shrink_evaluations,
                     if (hand_cases) |_| "found" else "none ", hand_value,
                 });
             },
@@ -538,7 +640,7 @@ pub fn main(init: std.process.Init) !void {
                 const exact = shrunk.len == 1 and shrunk[0].len == 256;
                 if (exact) t2_exact += 1;
                 out.print("{d:>4} | cases {d}, shrunk {d} run(s) first len {d}{s}, evals {d} | hand: {s}\n", .{
-                    seed,                    f.attempt_index + 1, shrunk.len, shrunk[0].len, if (exact) " (exact)" else "", f.shrink_evaluations,
+                    seed,                    f.origin.random.attempt_index + 1, shrunk.len, shrunk[0].len, if (exact) " (exact)" else "", f.shrink_evaluations,
                     hand_desc orelse "none",
                 });
             },
@@ -588,7 +690,7 @@ pub fn main(init: std.process.Init) !void {
                 if (is_sub) t3_subnormal += 1;
                 if (is_exact) t3_exact += 1;
                 out.print("{d:>4} | cases {d}, bits 0x{x:0>8}, {s}, evals {d} | hand: {s}, best rank {d}\n", .{
-                    seed,                                 f.attempt_index + 1, sbits, if (is_exact) "EXACT (rank 2)" else (if (is_sub) "subnormal" else "other"), f.shrink_evaluations,
+                    seed,                                 f.origin.random.attempt_index + 1, sbits, if (is_exact) "EXACT (rank 2)" else (if (is_sub) "subnormal" else "other"), f.shrink_evaluations,
                     if (hand_found) "found" else "none ", hand_best_rank,
                 });
             },
@@ -609,6 +711,9 @@ pub fn main(init: std.process.Init) !void {
     var t4_discovered: usize = 0;
     var t4_exact: usize = 0;
     var t4_control_ok: usize = 0;
+    // Kept for T9's gate (2): per-seed shrunk choices identical to T4's.
+    var t4_shrunk: [10]?[]zigprop.Choice = @splat(null);
+    defer for (t4_shrunk) |s| if (s) |c| allocator.free(c);
     for (0..10) |seed| {
         var report = try zigprop.check(allocator, Value, propValueMutant, .{ .seed = seed, .max_cases = 200 });
         defer report.deinit();
@@ -632,13 +737,14 @@ pub fn main(init: std.process.Init) !void {
         switch (report) {
             .failed => |f| {
                 t4_discovered += 1;
+                t4_shrunk[seed] = try allocator.dupe(zigprop.Choice, f.shrunk_choices);
                 var arena = std.heap.ArenaAllocator.init(allocator);
                 defer arena.deinit();
                 const shrunk = try replayValue(arena.allocator(), f.shrunk_choices);
                 const exact = isExpectedT4Minimum(shrunk);
                 if (exact) t4_exact += 1;
                 out.print("{d:>4} | cases {d}, shrunk {s}, evals {d} | hand: {s}, best keys {d}\n", .{
-                    seed,                                 f.attempt_index + 1, if (exact) "list[int 0, int 0, int 0] (exact)" else "other shape", f.shrink_evaluations,
+                    seed,                                 f.origin.random.attempt_index + 1, if (exact) "list[int 0, int 0, int 0] (exact)" else "other shape", f.shrink_evaluations,
                     if (hand_found) "found" else "none ", hand_best_keys,
                 });
             },
@@ -685,7 +791,7 @@ pub fn main(init: std.process.Init) !void {
                 if (off_min) t6_p6off_min += 1;
                 var buf: [256]u8 = undefined;
                 out.print("{d:>4} | cases {d}, root7 {}, shrunk {s}{s}, evals {d}, {s} | P6 off: keys {d}{s}, evals {d}\n", .{
-                    seed,         f.attempt_index + 1,               root7,           treeDesc(&buf, rep.value), if (minimal) " (minimal)" else "", f.shrink_evaluations, @tagName(f.shrink_outcome),
+                    seed,         f.origin.random.attempt_index + 1, root7,           treeDesc(&buf, rep.value), if (minimal) " (minimal)" else "", f.shrink_evaluations, @tagName(f.shrink_outcome),
                     off.keys.len, if (off_min) " (minimal)" else "", off.evaluations,
                 });
             },
@@ -732,7 +838,7 @@ pub fn main(init: std.process.Init) !void {
                 const off_min = std.mem.eql(u64, off.keys, &.{ 1, 7 });
                 if (off_min) t7_p5off_min += 1;
                 out.print("{d:>4} | cases {d}, len {d}, first7 {}, shrunk {any}{s}, evals {d}, {s} | P5 off: keys {any}{s}, evals {d}\n", .{
-                    seed,     f.attempt_index + 1,               orig.value.len,  first7, rep.value, if (minimal) " (minimal)" else "", f.shrink_evaluations, @tagName(f.shrink_outcome),
+                    seed,     f.origin.random.attempt_index + 1, orig.value.len,  first7, rep.value, if (minimal) " (minimal)" else "", f.shrink_evaluations, @tagName(f.shrink_outcome),
                     off.keys, if (off_min) " (minimal)" else "", off.evaluations,
                 });
             },
@@ -746,5 +852,117 @@ pub fn main(init: std.process.Init) !void {
     out.print("T7 measurements: original first=7 {d}, budget exhausted {d}, total evals {d}; P5 off minimal {d}/{d}; v0.2.1 (M0-e): found 10/10, minimal 8/10\n", .{ t7_first7, t7_exhausted, t7_evals_total, t7_p5off_min, t7_found });
     out.print("T7 criterion (>=8 discovered AND >=8 minimal [7], control 10/10): {s}\n", .{
         if (t7_found >= 8 and t7_min >= 8 and t7_ctl == 10) "MET" else "NOT MET",
+    });
+
+    // ---------------- T9 ----------------
+    out.print("\n== T9 T4 through checkWith (Ctx = codec, case.allocator, no globals) ==\n", .{});
+    out.print("seed | cases, shrunk shape, evals, shrunk choices == T4's\n", .{});
+    var t9_found: usize = 0;
+    var t9_exact: usize = 0;
+    var t9_same: usize = 0;
+    var t9_ctl: usize = 0;
+    var t9_leaks: usize = 0;
+    var t9_ctl_leaks: usize = 0;
+    const truncating: Codec = .{ .mode = .truncate };
+    const correct: Codec = .{ .mode = .correct };
+    for (0..10) |seed| {
+        var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        {
+            const gpa = dbg.allocator();
+            var r = try zigprop.checkWith(gpa, Value, *const Codec, &truncating, null, propT9, .{ .seed = seed, .max_cases = 200 });
+            defer r.deinit();
+            switch (r) {
+                .failed => |f| {
+                    t9_found += 1;
+                    var arena = std.heap.ArenaAllocator.init(gpa);
+                    defer arena.deinit();
+                    const shrunk = try replayValue(arena.allocator(), f.shrunk_choices);
+                    const exact = isExpectedT4Minimum(shrunk);
+                    if (exact) t9_exact += 1;
+                    const same = if (t4_shrunk[seed]) |c| std.mem.eql(u8, std.mem.sliceAsBytes(c), std.mem.sliceAsBytes(f.shrunk_choices)) else false;
+                    if (same) t9_same += 1;
+                    out.print("{d:>4} | cases {d}, shrunk {s}, evals {d}, same as T4: {}\n", .{
+                        seed, f.origin.random.attempt_index + 1, if (exact) "list[int 0, int 0, int 0] (exact)" else "other shape", f.shrink_evaluations, same,
+                    });
+                },
+                else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
+            }
+        }
+        if (dbg.deinit() == .leak) t9_leaks += 1;
+
+        var dbg_c: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        {
+            var c = try zigprop.checkWith(dbg_c.allocator(), Value, *const Codec, &correct, null, propT9, .{ .seed = seed, .max_cases = 200 });
+            defer c.deinit();
+            if (std.meta.activeTag(c) == .passed) t9_ctl += 1;
+        }
+        if (dbg_c.deinit() == .leak) t9_ctl_leaks += 1;
+    }
+    out.print("T9: discovered {d}/10, exact list[int 0 x3] {d}/10, shrunk choices identical to T4 {d}/{d}, leaking seeds {d}, control passed {d}/10 (leaking seeds {d}); container-level T9 buffers: none (code review)\n", .{ t9_found, t9_exact, t9_same, t4_discovered, t9_leaks, t9_ctl, t9_ctl_leaks });
+    out.print("T9 criterion (>=8 discovered AND >=8 exact AND identical to T4 on every seed AND 0 leaks, control 10/10): {s}\n", .{
+        if (t9_found >= 8 and t9_exact >= 8 and t9_same == t4_discovered and t9_found == t4_discovered and t9_leaks == 0 and t9_ctl == 10 and t9_ctl_leaks == 0) "MET" else "NOT MET",
+    });
+
+    // ---------------- T9e ----------------
+    out.print("\n== T9e error path (decoder returns error.UnexpectedLength on lists of 3+) ==\n", .{});
+    out.print("seed | cases, failure, shrunk shape, evals | hook: acceptances, kind violations\n", .{});
+    var t9e_found: usize = 0;
+    var t9e_kind: usize = 0;
+    var t9e_exact: usize = 0;
+    var t9e_violations: usize = 0;
+    var t9e_accepts: usize = 0;
+    var t9e_leaks: usize = 0;
+    const rejecting: Codec = .{ .mode = .reject };
+    const expected_failure: zigprop.Failure = .{ .returned_error = error.UnexpectedLength };
+    for (0..10) |seed| {
+        var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        {
+            const gpa = dbg.allocator();
+            var r = try zigprop.checkWith(gpa, Value, *const Codec, &rejecting, null, propT9, .{ .seed = seed, .max_cases = 200 });
+            defer r.deinit();
+            switch (r) {
+                .failed => |f| {
+                    t9e_found += 1;
+                    const kind_ok = f.failure.eql(expected_failure);
+                    if (kind_ok) t9e_kind += 1;
+                    var arena = std.heap.ArenaAllocator.init(gpa);
+                    defer arena.deinit();
+                    const a = arena.allocator();
+                    const shrunk = try replayValue(a, f.shrunk_choices);
+                    const exact = isExpectedT4Minimum(shrunk);
+                    if (exact) t9e_exact += 1;
+                    // Re-run the shrink from the same failing sequence
+                    // with the internal acceptance hook (§3.9).
+                    var src = zigprop.internal.Source.initReplay(a, f.choices, 100_000);
+                    var st: zigprop.internal.GenState = undefined;
+                    var gctx = zigprop.internal.genContextForTest(&st, &src, a, .{});
+                    _ = try zigprop.generate(Value, &gctx);
+                    var mon: KindMonitor = .{ .expected = expected_failure };
+                    const sr = try zigprop.internal.shrinkWith(a, Value, *const Codec, &rejecting, null, propT9, f.failure, .{}, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, .{ .on_accept = mon.hook() });
+                    const same = std.mem.eql(u8, std.mem.sliceAsBytes(sr.choices), std.mem.sliceAsBytes(f.shrunk_choices));
+                    t9e_violations += mon.violations;
+                    t9e_accepts += mon.accepts;
+                    out.print("{d:>4} | cases {d}, {s}, shrunk {s}, evals {d} | hook: {d} acceptances, {d} violations (hook rerun reproduces: {})\n", .{
+                        seed,
+                        f.origin.random.attempt_index + 1,
+                        switch (f.failure) {
+                            .returned_false => "returned false",
+                            .returned_error => |e| @errorName(e),
+                        },
+                        if (exact) "list[int 0, int 0, int 0] (exact)" else "other shape",
+                        f.shrink_evaluations,
+                        mon.accepts,
+                        mon.violations,
+                        same,
+                    });
+                },
+                else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
+            }
+        }
+        if (dbg.deinit() == .leak) t9e_leaks += 1;
+    }
+    out.print("T9e: discovered {d}/10, failure = returned_error(UnexpectedLength) {d}/{d}, kind kept on {d} acceptances with {d} violations, exact list[int 0 x3] {d}/10 (measurement), leaking seeds {d}; control: T9's correct codec\n", .{ t9e_found, t9e_kind, t9e_found, t9e_accepts, t9e_violations, t9e_exact, t9e_leaks });
+    out.print("T9e criterion (>=8 discovered AND kind reported on every discovery AND 0 kind violations AND 0 leaks): {s}\n", .{
+        if (t9e_found >= 8 and t9e_kind == t9e_found and t9e_violations == 0 and t9e_leaks == 0) "MET" else "NOT MET",
     });
 }

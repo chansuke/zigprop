@@ -25,24 +25,30 @@ model checking and benchmarks.
 const std = @import("std");
 const zigprop = @import("zigprop");
 
-const prop = struct {
-    fn run(xs: []const u32) bool {
-        std.mem.sort(u32, @constCast(xs), {}, std.sort.asc(u32));
-        return std.sort.isSorted(u32, xs, {}, std.sort.asc(u32));
-    }
-};
+fn sortsCorrectly(_: void, case: *zigprop.Case, xs: []const u32) !bool {
+    // Sort a copy in the per-case arena; the generated input is left
+    // as it was, so a failure reports the value that was generated.
+    const copy = try case.allocator.dupe(u32, xs);
+    std.mem.sort(u32, copy, {}, std.sort.asc(u32));
+    return std.sort.isSorted(u32, copy, {}, std.sort.asc(u32));
+}
 
 test "sorting sorts" {
-    try zigprop.checkOrError(std.testing.allocator, []const u32, prop.run, .{});
+    try zigprop.checkWithOrError(std.testing.allocator, []const u32, void, {}, null, sortsCorrectly, .{});
 }
 ```
 
-On failure, `checkOrError` prints the seed, the original value and
-the shrunk value, and returns `error.PropertyFailed`. Values are
-generated from the type — bool, integers, floats (f16/f32/f64),
-enums, tagged unions, optionals, arrays, slices, structs and
-recursive types built from them — and custom generators plug into
-`checkCustom`.
+On failure, `checkWithOrError` prints where the failure came from
+(seed and attempt, or the regression entry), the failure kind, the
+original and shrunk values, and a regression entry to paste into
+`tests/regressions.zon`, and returns `error.PropertyFailed`. A
+property may return an error: that is a failure too, and shrinking
+keeps its kind. Values are generated from the type — bool, integers,
+floats (f16/f32/f64), enums, tagged unions, optionals, arrays,
+slices, structs and recursive types built from them — and custom
+generators plug into `checkCustom` / `checkWith`. The simple forms
+`check`, `checkCustom` and `checkOrError` take a plain
+`fn (T) bool` property.
 
 ## Development
 

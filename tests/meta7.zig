@@ -169,7 +169,7 @@ test "recursion: shrinking a tree failure promotes the failing subtree" {
     });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
-    try std.testing.expect(report.failed.regression_index != null);
+    try std.testing.expect(report.failed.origin == .regression);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var consumed: usize = 0;

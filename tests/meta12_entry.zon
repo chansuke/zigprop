@@ -1,0 +1,9 @@
+// The entry printed by Report.Failed.regressionEntry for the
+// tests/meta12.zig "workflow: the printed entry round-trips" failure,
+// pasted verbatim into .entries (design v0.3 §5.7, D31).
+.{
+    .version = 1,
+    .entries = .{
+        .{ .id = "m12", .gen_version = 1, .choices = .{ 10 } },
+    },
+}

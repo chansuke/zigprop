@@ -236,8 +236,7 @@ fn shrinkFrom(comptime T: type, arena: std.mem.Allocator, property: *const fn (T
     var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena, limits);
     const v = try zigprop.generate(T, &ctx);
     try std.testing.expect(!property(v));
-    const r = try zigprop.internal.shrinkSpanned(std.testing.allocator, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", options);
-    defer std.testing.allocator.free(r.value_display);
+    const r = try zigprop.internal.shrinkSpanned(std.testing.allocator, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, options);
     defer std.testing.allocator.free(r.choices);
     var rep = zigprop.internal.Source.initReplay(arena, r.choices, 100_000);
     var rctx_state: GenState = undefined;
@@ -304,7 +303,7 @@ test "shrink: P1b deletes a size-3 chunk at the fixed point" {
     });
     defer report.deinit();
     const f = report.failed;
-    try std.testing.expect(f.regression_index != null);
+    try std.testing.expect(f.origin == .regression);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.fixed_point, f.shrink_outcome);
     var vals: [4]u64 = undefined;
     try std.testing.expectEqual(@as(usize, 4), f.shrunk_choices.len);
@@ -386,8 +385,7 @@ test "shrink: budget exhaustion stops the new passes early" {
     var ctx_state: GenState = undefined;
     var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, a, .{});
     _ = try zigprop.generate([]const u8, &ctx);
-    const r = try zigprop.internal.shrinkSpanned(std.testing.allocator, []const u8, null, noSevenBytes, .{}, 1, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", .{});
-    defer std.testing.allocator.free(r.value_display);
+    const r = try zigprop.internal.shrinkSpanned(std.testing.allocator, []const u8, null, noSevenBytes, .{}, 1, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, .{});
     defer std.testing.allocator.free(r.choices);
     try std.testing.expectEqual(@as(usize, 1), r.evaluations);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.budget_exhausted, r.outcome);

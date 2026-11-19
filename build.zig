@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(meta_tests).step);
 
-    for ([_][]const u8{ "tests/meta2.zig", "tests/examples.zig", "tests/meta3.zig", "tests/meta4.zig", "tests/meta5.zig", "tests/meta6.zig", "tests/meta7.zig", "tests/meta8.zig", "tests/meta9.zig", "tests/meta10.zig", "tests/meta10_rec.zig" }) |path| {
+    for ([_][]const u8{ "tests/meta2.zig", "tests/examples.zig", "tests/meta3.zig", "tests/meta4.zig", "tests/meta5.zig", "tests/meta6.zig", "tests/meta7.zig", "tests/meta8.zig", "tests/meta9.zig", "tests/meta10.zig", "tests/meta10_rec.zig", "tests/meta12.zig" }) |path| {
         const extra_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(path),

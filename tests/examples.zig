@@ -46,17 +46,16 @@ test "example: varint round-trip (design §5)" {
     try std.testing.expect(std.meta.activeTag(report) == .passed);
 }
 
+// The README example (design v0.3 §5.5): the property sorts a copy in
+// the per-case arena instead of mutating its input.
+fn sortsCorrectly(_: void, case: *zigprop.Case, xs: []const u32) !bool {
+    const copy = try case.allocator.dupe(u32, xs);
+    std.mem.sort(u32, copy, {}, std.sort.asc(u32));
+    return std.sort.isSorted(u32, copy, {}, std.sort.asc(u32));
+}
+
 test "example: sorting sorts" {
-    const prop = struct {
-        fn run(xs: []const u32) bool {
-            // The property works on its own copy (slices handed to a
-            // property are attempt-owned and must not be mutated
-            // in place if the original matters; here it does not).
-            std.mem.sort(u32, @constCast(xs), {}, std.sort.asc(u32));
-            return std.sort.isSorted(u32, xs, {}, std.sort.asc(u32));
-        }
-    };
-    try zigprop.checkOrError(std.testing.allocator, []const u32, prop.run, .{ .max_cases = 50 });
+    try zigprop.checkWithOrError(std.testing.allocator, []const u32, void, {}, null, sortsCorrectly, .{ .max_cases = 50 });
 }
 
 test "example: a failing property is reported, not hidden" {

@@ -225,7 +225,7 @@ test "floats: a class-0 regression shrinks to exactly 1.0" {
     });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
-    try std.testing.expect(report.failed.regression_index != null);
+    try std.testing.expect(report.failed.origin == .regression);
     var src: zigprop.internal.Source = undefined;
     const v = try genFromChoices(f32, report.failed.shrunk_choices, &src);
     src.deinit();
@@ -246,8 +246,8 @@ test "floats: a passing class-0 regression is counted, not reported as a failure
     });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .passed);
-    try std.testing.expectEqual(@as(usize, 1), report.passed.regressions_passed);
-    try std.testing.expectEqual(@as(usize, 0), report.passed.stale_regressions);
+    try std.testing.expectEqual(@as(usize, 1), report.passed.regressions.passed);
+    try std.testing.expectEqual(@as(usize, 0), report.passed.regressions.stale.len);
 }
 
 fn selfSubtractIsZero(x: f64) bool {
