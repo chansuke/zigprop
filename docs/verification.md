@@ -1,51 +1,67 @@
 # Verification map
 
-Every load-bearing claim of the Phase 0 design (v2) is tied to the
-cheapest evidence that can actually falsify it. This file is the index;
-keep it current when claims or evidence change.
+Correspondence table between the design properties currently
+enumerated and their evidence — mathematical models, finite model
+checking, and implementation tests. Completeness of the enumeration
+and fidelity of the models to the implementation are **not**
+guaranteed; the known-gaps section is part of the map. Wording was
+tightened after an external gap review (Codex / GPT-6.1-Sol,
+2026-11-19); several claims were narrowed to what the evidence
+actually shows, and the TLA+ model was remodelled where it diverged
+from the design.
 
-| # | Design claim | Evidence | Where |
-|---|---|---|---|
-| 1 | A recorded choice is always valid: `bound == 0 or value < bound` (MF1) | Lean proof `normalize_always_valid`; meta test over bounds {1,2,3,7,1000,2^63,0} | `formal/lean/ZigpropFormal/Normalize.lean`, `tests/meta.zig` |
-| 2 | The sentinel bound 0 passes values through; normalization is idempotent | Lean `normalize_sentinel`, `normalize_idempotent`; replay normalization meta test | Normalize.lean, `tests/meta.zig` |
-| 3 | Replay of a recorded sequence regenerates the same values and the same sequence | Meta test (300 mixed-bound draws) | `tests/meta.zig` |
-| 4 | Same seed + attempt reproduces a run; different attempts diverge | Meta tests; `deriveSeed` outputs pinned to fixed values | `tests/meta.zig`, `src/source.zig` |
-| 5 | `deriveSeed` is the specified SplitMix64 mix | Fixed-value unit tests (constants are the spec) | `src/source.zig` |
-| 6 | Signed generation: small rank ⇔ small magnitude; the zigzag encoding is a bijection (D1, MF7) | Lean `zigzagDecode_encode`, `zigzagEncode_decode`, `zigzagDecode_natAbs_le`, `zigzagEncode_le` | `formal/lean/ZigpropFormal/Zigzag.lean` |
-| 7 | Shrink acceptance cannot cycle; stored length never grows (MF2, MF4) | Lean `shortlex_irrefl / _trans / _asymm / _length_le` | `formal/lean/ZigpropFormal/Shortlex.lean` |
-| 8 | A counterexample is stored only after a confirmed failure; discard/pass never replace it (MF5) | TLA+ invariant `BestAlwaysFails`, `BestOnlyAfterFailure` (TLC, 3 configs) | `formal/tla/ZigpropRunner.tla` |
-| 9 | `fixed_point` is reported only when no smaller failing candidate exists; `budget_exhausted` only at budget 0 (MF4) | TLA+ invariant `OutcomeConsistency` | ZigpropRunner.tla |
-| 10 | Every run terminates (budget/case/discard counters are finite) | TLA+ property `Termination` under weak fairness | ZigpropRunner.tla |
-| 11 | `gave_up` only on discard-budget exhaustion | TLA+ invariant `OutcomeConsistency` | ZigpropRunner.tla |
-| 12 | Core throughput is understood before optimizing | Benchmarks + recorded baseline | `bench/`, `docs/profiling.md` |
+| # | Property | Evidence, scoped to what it actually establishes |
+|---|---|---|
+| 1 | Recorded choices are valid | In the Lean `Nat` model, normalization always yields a valid choice. For Source's normal random draws, recorded validity is checked for the enumerated bounds {1,2,3,7,1000,2^63,0} over finite samples (`formal/lean/ZigpropFormal/Normalize.lean`, `tests/meta.zig`) |
+| 2 | Sentinel and replay normalization | The sentinel is the identity; normalization is idempotent for all bounds (Lean `normalize_idempotent_all`). Zig replay checks one bound-change case and one sentinel case (`tests/meta.zig`) |
+| 3 | Replay fidelity | For one fixed bound sequence and draw count (300 draws), a normal replay reproduces the returned values and the re-recorded sequence (`tests/meta.zig`) |
+| 4 | Determinism | The same derived seed and bound sequence reproduce the same finite Source sequence; one example pair of attempts (seed 42, attempts 0/1) is shown to diverge on one bound sequence (`tests/meta.zig`) |
+| 5 | `deriveSeed` matches its specification | Outputs for 7 fixed inputs (including wrapping boundaries) are pinned by tests. Equivalence for all inputs is not proved; the pinned constants in `src/source.zig` are the spec |
+| 6 | Zigzag rank encoding (D1, MF7) | Over unbounded `Int`/`Nat`, the encoding is a bijection with the specified sign order, the exact magnitude formula `(r+1)/2`, and magnitude monotonicity in the rank (Lean `Zigzag.lean`). The connection to finite integer types (rank ranges, minimum values) is not proved |
+| 7 | Shortlex acceptance cannot cycle (MF2, MF4) | Over `List Nat`, shortlex is a strict partial order and acceptance never grows the stored length (Lean `Shortlex.lean`). That the implementation applies it to re-recorded consumed values is milestone-3 test territory, not yet verified |
+| 8 | Counterexamples are stored only after confirmed failure (MF5) | In the finite abstract model (now including the regressions phase and infrastructure-error aborts), a stored rank always belongs to the fixed `Failing` set (TLA+ `BestAlwaysFails`). Evaluation handling and Report construction in the implementation are not yet verified |
+| 9 | `fixed_point` / `budget_exhausted` semantics (MF4) | The TLA+ model encodes pass rounds: `fixed_point` is reported only after a full round with no acceptance (`clean_finish`), `budget_exhausted` only at budget 0 before such a round completes. TLC-checked on 4 configurations |
+| 10 | Termination | In the finite abstract model, under weak fairness on progress transitions and assuming each individual evaluation terminates, all runs reach `done` (TLC, 4 configurations). Implementation and user-callback termination are out of scope |
+| 11 | `gave_up` semantics | In the model, `gave_up` holds exactly when discards exceed the budget (`MaxDiscards + 1`) before enough valid cases; pass/fail attempts are blocked after the exceed. A `MaxDiscards = 0` configuration is checked |
+| 12 | Performance | Single-run microbenchmarks of some Source operations with pre-reserved recording capacity are recorded as a baseline (`bench/BASELINE.md`). Allocation behaviour, generators, runner and shrink performance are unmeasured |
 
 ## Layers
 
 - **Unit / meta tests** (`zig build test`, CI: ci.yml) — the
   implementation as written, on every push.
 - **Lean** (`formal/lean`, CI: formal.yml) — the arithmetic core
-  (normalization, zigzag, shortlex) as mathematics, independent of the
-  implementation. Core-only Lean, no Mathlib; `sorry`/`admit` are
-  rejected in CI; key theorems depend only on `propext` and
-  `Quot.sound`.
+  (normalization, zigzag, shortlex) as mathematics, independent of
+  the implementation. Core-only Lean, no Mathlib; CI runs an axiom
+  audit (`check-axioms.sh`) that fails on `sorryAx`; the sorry grep
+  is an auxiliary check only.
 - **TLA+ / TLC** (`formal/tla`, CI: formal.yml) — the runner/shrink
   *protocol* as a state machine, with choice sequences abstracted to
-  shortlex ranks. Three configurations check the empty and
-  rank-0 failing sets as edge cases.
+  shortlex ranks. Four configurations cover the empty failing set,
+  rank 0, and a zero discard budget.
 - **Benchmarks** (`zig build bench`, CI: smoke in ci.yml, full in
   bench.yml) — performance evidence, not correctness gates.
 
 ## Known gaps (honest list)
 
-- The Lean model works over `Nat`; the implementation works over
-  `u64`. The bridge (no overflow in normalization: `%` and the sentinel
-  never overflow) is argued in the design, not machine-checked.
-- Shortlex well-foundedness is *not* proved in Lean; the strict-order
-  properties are. Loop termination in the implementation rests on the
-  evaluation budget (finitely many evaluations), which the TLA+ model
-  checks as a protocol property.
-- The TLA+ model abstracts generators away: it cannot see distribution
-  bugs (§4.1) or comptime generation bugs (§4). Those are milestone 2+
-  test territory.
+- The Lean model works over `Nat`/`Int`; the implementation works
+  over `u64` and finite integer types. The bridge (no overflow in
+  normalization; rank ranges for finite types) is argued in the
+  design, not machine-checked. This applies to zigzag as well as
+  normalization.
+- The TLA+ rank abstraction is **not** a proven refinement of
+  shortlex on choice sequences: TLC checks the protocol given the
+  abstraction, not the sequence comparison, re-recording, or bounds
+  handling of the implementation.
+- Shortlex well-foundedness is not proved in Lean; the strict-order
+  properties are. Loop termination in the implementation rests on
+  the evaluation budget, modelled in TLA+ as a protocol property.
+- Random-mode draw correctness (uniformity of `intRangeLessThan`
+  usage), OOM paths beyond the sticky-error unit test, and replay
+  exhaustion interplay are only partially tested.
+- The GitHub Actions workflows have never run (the repository is
+  local-only); action versions are pinned by tag, not by SHA.
+- Cross-platform behaviour (macOS, 32-bit `usize` in `length`) is
+  untested.
 - Generator and runner claims (§4, §5 implementation) get their rows
-  when milestones 2–3 land.
+  when milestones 2–3 land; `regressions.zon` schema validation
+  arrives with the runner.
