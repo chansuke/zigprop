@@ -44,4 +44,12 @@ theorem normalize_idempotent {bound value : Nat} (hb : bound ≠ 0) :
   unfold normalize
   rw [if_neg hb, if_neg hb, Nat.mod_mod]
 
+/-- Idempotence for every bound, including the sentinel. -/
+theorem normalize_idempotent_all (bound value : Nat) :
+    normalize bound (normalize bound value) = normalize bound value := by
+  by_cases hb : bound = 0
+  · subst hb
+    rfl
+  · exact normalize_idempotent hb
+
 end ZigpropFormal

@@ -63,6 +63,29 @@ theorem zigzagDecode_natAbs_le (r : Nat) : (zigzagDecode r).natAbs ≤ r := by
     simp only [Int.natAbs_negSucc]
     omega
 
+/-- The decoded magnitude is exactly the rank rounded up to halves:
+rank `2k` ↦ `k`, rank `2k+1` ↦ `k+1`. -/
+theorem zigzagDecode_natAbs (r : Nat) : (zigzagDecode r).natAbs = (r + 1) / 2 := by
+  unfold zigzagDecode
+  by_cases h : r % 2 = 0
+  · rw [if_pos h]
+    have h2 := Nat.div_add_mod r 2
+    show r / 2 = (r + 1) / 2
+    omega
+  · rw [if_neg h]
+    have h1 : r % 2 = 1 := by omega
+    have h2 := Nat.div_add_mod r 2
+    rw [Int.natAbs_negSucc]
+    omega
+
+/-- Magnitude is monotone in the rank: lowering a rank never raises
+the decoded value's magnitude. This is the property that makes
+rank-level shrinking agree with value-level shrinking. -/
+theorem zigzagDecode_natAbs_mono {r₁ r₂ : Nat} (h : r₁ ≤ r₂) :
+    (zigzagDecode r₁).natAbs ≤ (zigzagDecode r₂).natAbs := by
+  rw [zigzagDecode_natAbs, zigzagDecode_natAbs]
+  omega
+
 /-- The rank of a value is at most twice its magnitude. -/
 theorem zigzagEncode_le (x : Int) : zigzagEncode x ≤ 2 * x.natAbs := by
   cases x with
