@@ -15,6 +15,9 @@ pub const deriveSeed = source.deriveSeed;
 pub const generate = gen_mod.generate;
 pub const generator_version = gen_mod.generator_version;
 
+pub const shrink = @import("shrink.zig").shrink;
+pub const ShrinkResult = @import("shrink.zig").ShrinkResult;
+
 pub const Config = runner_mod.Config;
 pub const Report = runner_mod.Report;
 pub const Regression = runner_mod.Regression;

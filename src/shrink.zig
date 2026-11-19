@@ -48,15 +48,24 @@ pub fn evaluateAttempt(
     src: *Source,
     attempt_allocator: Allocator,
     limits: Limits,
+    exhaustion_is_discard: bool,
 ) !AttemptResult {
     var ctx = GenContext{ .src = src, .allocator = attempt_allocator, .limits = limits };
     const value = (if (generator) |g| g(&ctx) else gen.generate(T, &ctx)) catch |err| {
+        // A sticky error (recording failure) outranks the generator's
+        // own error: it is an infrastructure error (MF5, §3).
+        if (src.sticky_error) |serr| return serr;
         if (err == error.InvalidGeneration) return .discard;
         return err; // infrastructure error: propagate (MF5)
     };
     if (src.sticky_error) |err| return err;
     if (src.limit_exceeded) return .discard;
-    if (src.exhausted) return .discard; // replay no longer matches the generator
+    // In the runner, an exhausted replay means the stored sequence no
+    // longer matches the generator (stale regression) -> discard. In
+    // the shrinker, a candidate is evaluated with zero padding and
+    // its re-recorded consumed sequence (padding included) is what
+    // the acceptance rule compares (§6).
+    if (src.exhausted and exhaustion_is_discard) return .discard;
     if (property(value)) return .pass;
     const choices = try result_allocator.dupe(Choice, src.recorded.items);
     errdefer result_allocator.free(choices);
@@ -105,13 +114,21 @@ pub fn shrink(
         limits: Limits,
         budget: usize,
         evaluations: usize = 0,
+        /// Set when an evaluation was requested beyond the budget.
+        /// Control flow uses this flag, never an error name: Zig
+        /// errors are interned by name globally, so a generator could
+        /// return the same error and be mistaken for budget control.
+        exhausted: bool = false,
         best: []Choice,
         best_display: []u8,
 
         const Fail = @FieldType(AttemptResult, "fail");
 
         fn evalCandidate(self: *@This(), values: []const u64) !?Fail {
-            if (self.evaluations >= self.budget) return error.ShrinkBudgetExhausted;
+            if (self.evaluations >= self.budget) {
+                self.exhausted = true;
+                return null;
+            }
             self.evaluations += 1;
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
@@ -120,7 +137,7 @@ pub fn shrink(
             for (values, replay) |v, *c| c.* = .{ .bound = 0, .value = v };
             var src = Source.initReplay(aa, replay, self.limits.max_draws);
             defer src.deinit();
-            const result = try evaluateAttempt(self.allocator, T, self.generator, self.property, &src, aa, self.limits);
+            const result = try evaluateAttempt(self.allocator, T, self.generator, self.property, &src, aa, self.limits, false);
             return switch (result) {
                 .fail => |f| f,
                 else => null,
@@ -131,6 +148,7 @@ pub fn shrink(
         /// stored best is replaced by the re-recorded consumed
         /// sequence. Returns whether the best changed.
         fn tryAccept(self: *@This(), values: []const u64) !bool {
+            if (self.exhausted) return false;
             const f = (try self.evalCandidate(values)) orelse return false;
             if (!shortlexLess(f.choices, self.best)) {
                 self.allocator.free(f.choices);
@@ -168,7 +186,7 @@ pub fn shrink(
                         changed_any = true;
                         i = 0; // rescan the new sequence at this size
                     } else {
-                        i += chunk;
+                        i += 1; // every start position, not just aligned ones (§6)
                     }
                 }
                 if (chunk == 1) break;
@@ -232,23 +250,31 @@ pub fn shrink(
         }
     };
 
+    const best_copy = try result_allocator.dupe(Choice, initial);
+    const best_display_copy = result_allocator.dupe(u8, initial_display) catch |err| {
+        result_allocator.free(best_copy);
+        return err;
+    };
     var inner = Inner{
         .allocator = result_allocator,
         .generator = generator,
         .property = property,
         .limits = limits,
         .budget = budget,
-        .best = try result_allocator.dupe(Choice, initial),
-        .best_display = try result_allocator.dupe(u8, initial_display),
+        .best = best_copy,
+        .best_display = best_display_copy,
     };
     const outcome: ShrinkOutcome = blk: {
         while (true) {
             const changed = inner.round() catch |err| {
-                if (err == error.ShrinkBudgetExhausted) break :blk .budget_exhausted;
                 result_allocator.free(inner.best);
                 result_allocator.free(inner.best_display);
                 return err;
             };
+            // Budget exhaustion outranks fixed_point: a round only
+            // counts as complete when every candidate was actually
+            // evaluated (the TLA+ model's priority rule).
+            if (inner.exhausted) break :blk .budget_exhausted;
             if (!changed) break :blk .fixed_point;
         }
     };

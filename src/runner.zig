@@ -194,7 +194,7 @@ fn run(
             }
             var src = Source.initReplay(aa, replay_choices, config.limits.max_draws);
             defer src.deinit();
-            const result = try shrink_mod.evaluateAttempt(allocator, T, generator, property, &src, aa, config.limits);
+            const result = try shrink_mod.evaluateAttempt(allocator, T, generator, property, &src, aa, config.limits, true);
             switch (result) {
                 .pass => regressions_passed += 1,
                 .discard => {
@@ -233,7 +233,7 @@ fn run(
         const aa = arena.allocator();
         var src = Source.initRandom(aa, source.deriveSeed(config.seed, @intCast(attempt)), config.limits.max_draws);
         defer src.deinit();
-        const result = try shrink_mod.evaluateAttempt(allocator, T, generator, property, &src, aa, config.limits);
+        const result = try shrink_mod.evaluateAttempt(allocator, T, generator, property, &src, aa, config.limits, true);
         switch (result) {
             .pass => cases += 1,
             .discard => discards += 1,
