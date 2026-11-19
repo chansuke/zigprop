@@ -7,6 +7,7 @@
 (* ranks whose replay makes the property fail. This is a finite           *)
 (* abstraction, not a proven refinement of shortlex on sequences: TLC     *)
 (* checks the protocol rules below, not the sequence comparison itself.   *)
+(* v0.3 passes are ShrinkAccept instances; stale is in RegressionPass.    *)
 (*                                                                          *)
 (* Protocol rules modelled:                                               *)
 (*  - regressions replay first; a failing regression enters shrinking     *)
