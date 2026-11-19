@@ -44,9 +44,10 @@ const ZNode2 = struct { f: ZU2, kids: []const ZNode2 };
 fn genReplay(comptime T: type, arena: *std.heap.ArenaAllocator, values: []const u64, limits: zigprop.Limits, consumed: *usize) !T {
     var buf: [64]Choice = undefined;
     for (values, 0..) |v, i| buf[i] = .{ .bound = 0, .value = v };
-    var src = zigprop.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = limits };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), limits);
     const v = try zigprop.generate(T, &ctx);
     consumed.* = src.pos;
     return v;
@@ -56,9 +57,10 @@ fn genRandom(comptime T: type, arena: *std.heap.ArenaAllocator, seed: u64, limit
     // Recursive generation may discard (element budget); walk
     // attempts until one succeeds.
     for (0..64) |attempt| {
-        var src = zigprop.Source.initRandom(std.testing.allocator, zigprop.deriveSeed(seed, attempt), 100_000);
+        var src = zigprop.internal.Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(seed, attempt), 100_000);
         defer src.deinit();
-        var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = limits };
+        var ctx_state: zigprop.internal.GenState = undefined;
+        var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), limits);
         return zigprop.generate(T, &ctx) catch |err| switch (err) {
             error.InvalidGeneration => continue,
             else => return err,
@@ -185,9 +187,10 @@ test "cut: an all-void union field no longer makes the cut fail" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     for (0..10) |seed| {
-        var src = zigprop.Source.initRandom(std.testing.allocator, zigprop.deriveSeed(seed, 0), 100_000);
+        var src = zigprop.internal.Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(seed, 0), 100_000);
         defer src.deinit();
-        var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = .{ .max_depth = 0, .max_len = 4 } };
+        var ctx_state: zigprop.internal.GenState = undefined;
+        var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), .{ .max_depth = 0, .max_len = 4 });
         const n = try zigprop.generate(Node, &ctx);
         for (n.kids) |k| {
             try std.testing.expect(std.meta.activeTag(k.c) == .red);

@@ -23,9 +23,10 @@ const Value = union(enum) { int: i64, str: []const u8, list: []const Value };
 fn genReplay(comptime T: type, arena: *std.heap.ArenaAllocator, values: []const u64, limits: zigprop.Limits, consumed: *usize) !T {
     var buf: [64]Choice = undefined;
     for (values, 0..) |v, i| buf[i] = .{ .bound = 0, .value = v };
-    var src = zigprop.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = limits };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), limits);
     const v = try zigprop.generate(T, &ctx);
     consumed.* = src.pos;
     return v;
@@ -35,9 +36,10 @@ fn genRandom(comptime T: type, arena: *std.heap.ArenaAllocator, seed: u64, limit
     // Generation of a recursive type may discard (element budget);
     // walk attempts until one succeeds.
     for (0..64) |attempt| {
-        var src = zigprop.Source.initRandom(std.testing.allocator, zigprop.deriveSeed(seed, attempt), 100_000);
+        var src = zigprop.internal.Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(seed, attempt), 100_000);
         defer src.deinit();
-        var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = limits };
+        var ctx_state: zigprop.internal.GenState = undefined;
+        var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), limits);
         return zigprop.generate(T, &ctx) catch |err| switch (err) {
             error.InvalidGeneration => continue,
             else => return err,
@@ -106,11 +108,12 @@ test "recursion: depth is restored on the error path" {
     var buf: [16]Choice = undefined;
     const values = [_]u64{ 0, 0, 1, 0, 0, 2, 0, 0, 0 };
     for (values, 0..) |v, i| buf[i] = .{ .bound = 0, .value = v };
-    var src = zigprop.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
     defer src.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = .{ .max_total_elements = 2, .max_len = 4 } };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), .{ .max_total_elements = 2, .max_len = 4 });
     try std.testing.expectError(error.InvalidGeneration, zigprop.generate(Tree, &ctx));
     try std.testing.expectEqual(@as(usize, 0), ctx.depth);
 }
@@ -179,9 +182,10 @@ test "recursion: shrinking a tree failure promotes the failing subtree" {
     try std.testing.expectEqual(@as(usize, 0), t.kids.len);
     // The key sequence is [14, 0]: one integer pair (key 14, the
     // second position skipped) and the length draw 0.
-    var src = zigprop.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), .{});
     _ = try zigprop.generate(Tree, &ctx);
     var keys: std.ArrayList(u64) = .empty;
     defer keys.deinit(std.testing.allocator);
