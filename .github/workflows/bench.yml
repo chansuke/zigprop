@@ -8,18 +8,29 @@ on:
       - "bench/**"
       - "src/**"
       - "build.zig"
+      - "build.zig.zon"
+      - ".github/workflows/bench.yml"
+
+permissions:
+  contents: read
 
 jobs:
   bench:
     name: full benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.1
       - name: Run benchmarks
-        run: zig build bench | tee bench-output.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Benchmark output is printed to stderr (std.debug.print).
+          zig build bench 2>&1 | tee bench-output.txt
+          grep -q "ns/op" bench-output.txt
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:

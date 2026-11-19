@@ -5,24 +5,35 @@ on:
     branches: [main]
     paths:
       - "formal/**"
+      - "src/**"
+      - "docs/verification.md"
       - ".github/workflows/formal.yml"
   pull_request:
     paths:
       - "formal/**"
+      - "src/**"
+      - "docs/verification.md"
       - ".github/workflows/formal.yml"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   lean:
     name: Lean proofs
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Build Lean model (no sorry allowed)
+      - name: Build Lean model
         uses: leanprover/lean-action@v1
         with:
           lake-package-directory: formal/lean
-      - name: Reject sorry / admit
+      - name: Axiom audit (no sorryAx in key theorems)
+        working-directory: formal/lean
+        run: ./check-axioms.sh
+      - name: Reject sorry / admit (auxiliary check)
         run: |
           if grep -rn --include='*.lean' -E '\b(sorry|admit)\b' formal/lean/ZigpropFormal formal/lean/ZigpropFormal.lean; then
             echo "sorry/admit found in Lean proofs" >&2
@@ -32,20 +43,25 @@ jobs:
   tla:
     name: TLA+ model checking (TLC)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-      - name: Fetch tla2tools
+      - name: Fetch tla2tools (checksum-pinned)
         run: |
-          curl -sL -o /tmp/tla2tools.jar \
+          curl -fsSL -o /tmp/tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          echo "7e53aa636dac8a3cb0533f343115c0548e03fc0ce5edc7739becf58d3d0fb84f  /tmp/tla2tools.jar" \
+            | sha256sum -c -
       - name: Run TLC (all configurations)
         working-directory: formal/tla
+        shell: bash
         run: |
-          for cfg in ZigpropRunner.cfg ZigpropRunnerEmpty.cfg ZigpropRunnerZero.cfg; do
+          set -euo pipefail
+          for cfg in ZigpropRunner.cfg ZigpropRunnerEmpty.cfg ZigpropRunnerZero.cfg ZigpropRunnerNoDiscard.cfg; do
             echo "== $cfg"
             java -jar /tmp/tla2tools.jar -config "$cfg" ZigpropRunner.tla \
               | tee "/tmp/tlc-$cfg.out"
