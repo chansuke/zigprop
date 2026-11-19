@@ -18,6 +18,6 @@ if command -v perf >/dev/null 2>&1; then
     echo "  perf record -g -- $BIN"
     echo "  perf script | stackcollapse-perf.pl | flamegraph.pl > flame.svg"
 else
-    echo "perf not found; running plain timed bench (see docs/profiling.md)"
-    time "$BIN" "$@"
+    echo "perf not found; running plain bench (see docs/profiling.md)"
+    "$BIN" "$@"
 fi
