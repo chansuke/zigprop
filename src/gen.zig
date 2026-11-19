@@ -27,6 +27,7 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
         .bool => return ctx.src.boolean(),
         .int => return generateInt(T, ctx),
         .float => return generateFloat(T, ctx),
+        .@"union" => return generateUnion(T, ctx),
         .@"enum" => return generateEnum(T, ctx),
         .optional => |opt| {
             if (ctx.src.boolean()) {
@@ -77,8 +78,8 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
             return result;
         },
         else => @compileError("zigprop: unsupported type " ++ @typeName(T) ++
-            " (generates bool, integers of 1-64 bits, f16/f32/f64, enums, optionals, " ++
-            "arrays, slices and structs; use checkCustom for anything else)"),
+            " (generates bool, integers of 1-64 bits, f16/f32/f64, enums, tagged unions, " ++
+            "optionals, arrays, slices and structs; use checkCustom for anything else)"),
     }
 }
 
@@ -340,6 +341,38 @@ fn generateFloat(comptime T: type, ctx: *GenContext) !T {
     // share one key, and P4's "current rank" is unique.
     ctx.src.annotatePair(pair_start, floatValueToRank(T, value));
     return value;
+}
+
+// ---------------------------------------------------------------------
+// Tagged unions (design v0.2 §2): a tag draw (an ordinary index
+// draw over the declared variants), then the payload's own draws.
+// The tag is a semantic distinction, not a re-expressible encoding,
+// so it gets no pair annotation and no P4 treatment: under the
+// key-sequence acceptance rule the number of keys decides first
+// and the tag index only breaks ties (design v0.2 §2.2).
+// ---------------------------------------------------------------------
+
+fn generateUnion(comptime T: type, ctx: *GenContext) !T {
+    const un = @typeInfo(T).@"union";
+    if (un.tag_type == null) {
+        @compileError("zigprop: untagged unions are not generated: " ++ @typeName(T) ++
+            " (declare the union with an enum tag)");
+    }
+    if (un.field_names.len == 0) {
+        @compileError("zigprop: unions with no variants are not generated: " ++ @typeName(T));
+    }
+    // Only the named variants are generated; a non-exhaustive tag
+    // enum's unnamed values never appear (the same rule as enums).
+    const idx = ctx.src.index(un.field_names.len);
+    inline for (un.field_names, un.field_types, 0..) |name, Payload, i| {
+        if (idx == i) {
+            if (Payload == void) {
+                return @unionInit(T, name, {});
+            }
+            return @unionInit(T, name, try generate(Payload, ctx));
+        }
+    }
+    unreachable; // the tag draw is in range by construction
 }
 
 fn generateEnum(comptime T: type, ctx: *GenContext) !T {
