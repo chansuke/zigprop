@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (zig ${{ matrix.zig }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        zig: ["0.17.1"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig }}
+      - name: Format check
+        run: zig fmt --check src tests bench build.zig
+      - name: Unit and meta tests
+        run: zig build test --summary all
+      - name: Benchmark harness (smoke)
+        run: zig build bench -Dsmoke
+
+  zig-master:
+    name: early warning (zig master, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+      - name: Tests on master
+        run: zig build test --summary all

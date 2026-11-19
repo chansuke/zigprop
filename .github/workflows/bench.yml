@@ -1,0 +1,27 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "bench/**"
+      - "src/**"
+      - "build.zig"
+
+jobs:
+  bench:
+    name: full benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+      - name: Run benchmarks
+        run: zig build bench | tee bench-output.txt
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-output
+          path: bench-output.txt
