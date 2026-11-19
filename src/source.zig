@@ -58,6 +58,14 @@ pub const Source = struct {
     mode: Mode,
     allocator: Allocator,
     recorded: std.ArrayList(Choice) = .empty,
+    /// Canonical comparison key per recorded choice (design §4.1/§6,
+    /// v2.1). Defaults to the choice value; integer generation annotates
+    /// a pair with the generated value's rank so shrink acceptance
+    /// compares value simplicity, not class encodings.
+    recorded_keys: std.ArrayList(u64) = .empty,
+    /// Recorded positions excluded from the key comparison: the second
+    /// choice of an annotated integer pair.
+    recorded_skip: std.ArrayList(bool) = .empty,
     /// Replay cursor.
     pos: usize = 0,
     /// Set when a replay ran past the end of the recorded sequence.
@@ -91,12 +99,37 @@ pub const Source = struct {
 
     pub fn deinit(self: *Source) void {
         self.recorded.deinit(self.allocator);
+        self.recorded_keys.deinit(self.allocator);
+        self.recorded_skip.deinit(self.allocator);
     }
 
     fn record(self: *Source, choice: Choice) void {
         self.recorded.append(self.allocator, choice) catch |err| {
             if (self.sticky_error == null) self.sticky_error = err;
+            return;
         };
+        self.recorded_keys.append(self.allocator, choice.value) catch |err| {
+            if (self.sticky_error == null) self.sticky_error = err;
+            return;
+        };
+        self.recorded_skip.append(self.allocator, false) catch |err| {
+            if (self.sticky_error == null) self.sticky_error = err;
+        };
+    }
+
+    /// Annotates the two recorded choices starting at `start` as one
+    /// integer draw whose canonical key is `key` (the generated value's
+    /// rank): the first position carries the key, the second is skipped
+    /// in key comparisons (design §4.1, v2.1). Out-of-range positions
+    /// (a draw limit tripped mid-pair) are ignored; such attempts are
+    /// discards anyway.
+    pub fn annotatePair(self: *Source, start: usize, key: u64) void {
+        if (start < self.recorded_keys.items.len) {
+            self.recorded_keys.items[start] = key;
+        }
+        if (start + 1 < self.recorded_skip.items.len) {
+            self.recorded_skip.items[start + 1] = true;
+        }
     }
 
     /// The one base primitive. `bound > 0` draws uniformly from

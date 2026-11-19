@@ -145,6 +145,7 @@ fn generateInt(comptime T: type, ctx: *GenContext) !T {
     // Rank domain R = 2^W; the draw bound is R itself, or the sentinel
     // bound 0 when W == 64.
     const domain: u128 = @as(u128, 1) << @intCast(info.bits);
+    const pair_start = ctx.src.recorded.items.len;
     const class = ctx.src.range(4); // the class draw is always consumed
     const rank: u64 = switch (class) {
         0 => ctx.src.range(@intCast(@min(domain, 256))),
@@ -156,6 +157,10 @@ fn generateInt(comptime T: type, ctx: *GenContext) !T {
         2 => ctx.src.range(@intCast(@min(domain, 65536))),
         else => ctx.src.range(if (domain == (@as(u128, 1) << 64)) 0 else @intCast(domain)),
     };
+    // The pair (class draw, value draw) is one integer draw for shrink
+    // purposes: annotate it with the value's rank as its canonical key
+    // (design §4.1, v2.1).
+    ctx.src.annotatePair(pair_start, rank);
     return rankToValue(T, rank);
 }
 
