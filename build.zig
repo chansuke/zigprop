@@ -24,4 +24,23 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(meta_tests).step);
+
+    // Benchmark / profiling harness (bench/main.zig), always ReleaseFast.
+    const bench_exe = b.addExecutable(.{
+        .name = "zigprop-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "zigprop", .module = mod }},
+        }),
+    });
+    const bench_step = b.step("bench", "Run benchmarks");
+    const run_bench = b.addRunArtifact(bench_exe);
+    const smoke = b.option(bool, "smoke", "Run benchmarks in smoke mode (CI)") orelse false;
+    if (smoke) run_bench.addArg("--smoke");
+    bench_step.dependOn(&run_bench.step);
+
+    const bench_bin_step = b.step("bench-bin", "Install the benchmark binary");
+    bench_bin_step.dependOn(&b.addInstallArtifact(bench_exe, .{}).step);
 }
