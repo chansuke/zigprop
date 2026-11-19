@@ -8,10 +8,19 @@
 //! simplicity rather than class encodings). P4 (re-expression)
 //! additionally accepts a key-equal lateral move that rewrites an
 //! integer pair into the full-domain class so P3 can descend it.
-//! Passes repeat until a full round changes nothing
+//!
+//! v0.3 round (design v0.3 §3.2, D22): P6 subtree promotion → P5
+//! element deletion → P1 chunk deletion → P4 → P2 zero → P3
+//! decrease; when that round changed nothing and budget remains,
+//! P1b (chunk sizes 7, 6, 5, 3) runs as the expensive pass. P5 and
+//! P6 build candidates from span annotations, but every new pass
+//! replaces the best only through `tryAccept` (ordinary acceptance),
+//! so a wrong or stale span cannot break soundness (§3.4).
+//! Passes repeat until a full round, P1b included, changes nothing
 //! (`fixed_point`) or the evaluation budget runs out
-//! (`budget_exhausted`). Infrastructure errors abort the shrink
-//! and propagate.
+//! (`budget_exhausted`). After exhaustion every pass loop exits at
+//! its head instead of building further candidates (§3.2 item 6).
+//! Infrastructure errors abort the shrink and propagate.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -26,6 +35,45 @@ const Span = source.Span;
 pub const ShrinkOutcome = enum {
     fixed_point,
     budget_exhausted,
+};
+
+/// The shrink passes (design §6 and v0.3 §3.2).
+pub const ShrinkPass = enum { p1_chunks, p1b_chunks, p2_zero, p3_decrease, p4_reexpress, p5_delete, p6_promote };
+
+/// Internal pass mask for ablation measurements (design v0.3 §8.2
+/// T6/T7). Not part of the public API; the runner always uses the
+/// full mask.
+pub const ShrinkPassMask = struct {
+    p1: bool = true,
+    p1b: bool = true,
+    p2: bool = true,
+    p3: bool = true,
+    p4: bool = true,
+    p5: bool = true,
+    p6: bool = true,
+};
+
+/// One acceptance, reported to the internal hook before the best is
+/// replaced (design v0.3 §3.9). `lateral` marks P4's key-equal move;
+/// every other acceptance must be strictly shortlex-smaller.
+pub const AcceptEvent = struct {
+    pass: ShrinkPass,
+    lateral: bool,
+    before_keys: []const u64,
+    before_skips: []const bool,
+    after_keys: []const u64,
+    after_skips: []const bool,
+};
+
+pub const AcceptHook = struct {
+    context: *anyopaque,
+    call: *const fn (context: *anyopaque, event: AcceptEvent) void,
+};
+
+/// Internal shrink options: the pass mask and the acceptance hook.
+pub const ShrinkOptions = struct {
+    passes: ShrinkPassMask = .{},
+    on_accept: ?AcceptHook = null,
 };
 
 pub const AttemptResult = union(enum) {
@@ -149,12 +197,13 @@ pub fn shrink(
     initial_skips: []const bool,
     initial_display: []const u8,
 ) !ShrinkResult {
-    return shrinkSpanned(result_allocator, T, generator, property, limits, budget, initial, initial_keys, initial_skips, &.{}, initial_display);
+    return shrinkSpanned(result_allocator, T, generator, property, limits, budget, initial, initial_keys, initial_skips, &.{}, initial_display, .{});
 }
 
 /// `shrink` with the initial sequence's span annotations (design
-/// v0.3 §3.2). The runner uses this form; spans are metadata and
-/// never affect acceptance.
+/// v0.3 §3.2) and the internal options (pass mask, acceptance hook).
+/// The runner uses this form with default options; spans are
+/// metadata and never affect acceptance.
 pub fn shrinkSpanned(
     result_allocator: Allocator,
     comptime T: type,
@@ -167,6 +216,7 @@ pub fn shrinkSpanned(
     initial_skips: []const bool,
     initial_spans: []const Span,
     initial_display: []const u8,
+    options: ShrinkOptions,
 ) !ShrinkResult {
     const Inner = struct {
         allocator: Allocator,
@@ -174,6 +224,7 @@ pub fn shrinkSpanned(
         property: *const fn (T) bool,
         limits: Limits,
         budget: usize,
+        options: ShrinkOptions,
         evaluations: usize = 0,
         /// Set when an evaluation was requested beyond the budget.
         /// Control flow uses this flag, never an error name: Zig
@@ -235,16 +286,33 @@ pub fn shrinkSpanned(
         /// stored best is replaced by the re-recorded consumed
         /// sequence. Acceptance requires the candidate's key
         /// sequence to be strictly shortlex-smaller (design §6,
-        /// v2.1). Returns whether the best changed.
-        fn tryAccept(self: *@This(), values: []const u64) !bool {
+        /// v2.1). Returns whether the best changed. This is the only
+        /// acceptance path of every pass except P4's lateral move
+        /// (design v0.3 §3.3): P5, P6 and P1b use it unchanged.
+        fn tryAccept(self: *@This(), values: []const u64, pass: ShrinkPass) !bool {
             if (self.exhausted) return false;
             const f = (try self.evalCandidate(values)) orelse return false;
             if (!keyShortlexLess(f.keys, f.skips, self.best_keys, self.best_skips)) {
                 self.freeFail(f);
                 return false;
             }
+            self.notify(pass, false, f);
             self.replaceBest(f);
             return true;
+        }
+
+        /// Reports an acceptance to the internal hook (design v0.3
+        /// §3.9) before the best is replaced.
+        fn notify(self: *@This(), pass: ShrinkPass, lateral: bool, f: Fail) void {
+            const hook = self.options.on_accept orelse return;
+            hook.call(hook.context, .{
+                .pass = pass,
+                .lateral = lateral,
+                .before_keys = self.best_keys,
+                .before_skips = self.best_skips,
+                .after_keys = f.keys,
+                .after_skips = f.skips,
+            });
         }
 
         /// P4 acceptance (design §6, v2.1): a lateral move that keeps
@@ -265,6 +333,7 @@ pub fn shrinkSpanned(
                 self.freeFail(f);
                 return false;
             }
+            self.notify(.p4_reexpress, true, f);
             self.replaceBest(f);
             return true;
         }
@@ -276,6 +345,28 @@ pub fn shrinkSpanned(
             return list;
         }
 
+        /// Deletes the chunk [i, i + size) at every start position,
+        /// rescanning the new sequence at the same size after each
+        /// acceptance (design §6).
+        fn chunkSize(self: *@This(), size: usize, pass: ShrinkPass) !bool {
+            var changed_any = false;
+            var i: usize = 0;
+            while (i + size <= self.best.len) {
+                if (self.exhausted) break;
+                var cand: std.ArrayList(u64) = .empty;
+                defer cand.deinit(self.allocator);
+                for (self.best[0..i]) |c| try cand.append(self.allocator, c.value);
+                for (self.best[i + size ..]) |c| try cand.append(self.allocator, c.value);
+                if (try self.tryAccept(cand.items, pass)) {
+                    changed_any = true;
+                    i = 0; // rescan the new sequence at this size
+                } else {
+                    i += 1; // every start position, not just aligned ones (§6)
+                }
+            }
+            return changed_any;
+        }
+
         /// P1: chunk deletion. Chunk sizes start at half of the
         /// largest power of two ≤ len and halve down to 1 (design §6).
         fn passChunks(self: *@This()) !bool {
@@ -283,21 +374,24 @@ pub fn shrinkSpanned(
             if (self.best.len == 0) return false;
             var chunk: usize = @max(1, highestPow2(@intCast(self.best.len)) / 2);
             while (true) {
-                var i: usize = 0;
-                while (i + chunk <= self.best.len) {
-                    var cand: std.ArrayList(u64) = .empty;
-                    defer cand.deinit(self.allocator);
-                    for (self.best[0..i]) |c| try cand.append(self.allocator, c.value);
-                    for (self.best[i + chunk ..]) |c| try cand.append(self.allocator, c.value);
-                    if (try self.tryAccept(cand.items)) {
-                        changed_any = true;
-                        i = 0; // rescan the new sequence at this size
-                    } else {
-                        i += 1; // every start position, not just aligned ones (§6)
-                    }
-                }
+                if (self.exhausted) break;
+                if (try self.chunkSize(chunk, .p1_chunks)) changed_any = true;
                 if (chunk == 1) break;
                 chunk /= 2;
+            }
+            return changed_any;
+        }
+
+        /// P1b, the expensive pass (design v0.3 §3.2 item 4, D17):
+        /// chunk deletion with the non-power-of-two sizes {3, 5, 6, 7}
+        /// not above len, largest first like P1. Runs only when a
+        /// round changed nothing.
+        fn passChunksExtra(self: *@This()) !bool {
+            var changed_any = false;
+            for ([_]usize{ 7, 6, 5, 3 }) |size| {
+                if (self.exhausted) break;
+                if (size > self.best.len) continue;
+                if (try self.chunkSize(size, .p1b_chunks)) changed_any = true;
             }
             return changed_any;
         }
@@ -307,11 +401,12 @@ pub fn shrinkSpanned(
             var changed_any = false;
             var i: usize = 0;
             while (i < self.best.len) : (i += 1) {
+                if (self.exhausted) break;
                 if (self.best[i].value == 0) continue;
                 var cand = try self.candidateValues();
                 defer cand.deinit(self.allocator);
                 cand.items[i] = 0;
-                if (try self.tryAccept(cand.items)) changed_any = true;
+                if (try self.tryAccept(cand.items, .p2_zero)) changed_any = true;
             }
             return changed_any;
         }
@@ -322,6 +417,7 @@ pub fn shrinkSpanned(
             var changed_any = false;
             var i: usize = 0;
             while (i < self.best.len) {
+                if (self.exhausted) break;
                 if (self.best[i].value == 0) {
                     i += 1;
                     continue;
@@ -331,10 +427,11 @@ pub fn shrinkSpanned(
                     improved = false;
                     var delta = highestPow2(self.best[i].value);
                     while (true) {
+                        if (self.exhausted) break;
                         var cand = try self.candidateValues();
                         defer cand.deinit(self.allocator);
                         cand.items[i] = self.best[i].value - delta;
-                        if (try self.tryAccept(cand.items)) {
+                        if (try self.tryAccept(cand.items, .p3_decrease)) {
                             changed_any = true;
                             improved = true;
                             break;
@@ -358,6 +455,7 @@ pub fn shrinkSpanned(
             var changed_any = false;
             var i: usize = 0;
             while (i + 1 < self.best.len) : (i += 1) {
+                if (self.exhausted) break;
                 if (self.best_skips[i] or !self.best_skips[i + 1]) continue;
                 if (self.best[i].value == 3) continue;
                 var cand = try self.candidateValues();
@@ -369,12 +467,143 @@ pub fn shrinkSpanned(
             return changed_any;
         }
 
+        /// P6: subtree promotion (design v0.3 §3.2 item 3, D20). For
+        /// each occurrence span X (pre-order) and each nearest
+        /// same-type occurrence Y inside X (no same-type occurrence
+        /// between them), try `values[0..X.start] ++ values[Y] ++
+        /// values[X.end..]`. One level per acceptance; after an
+        /// acceptance the same X position is retried against the new
+        /// best (the prefix before X.start is unchanged, so the span
+        /// index of X is too).
+        fn passPromote(self: *@This()) !bool {
+            var changed_any = false;
+            var i: usize = 0;
+            while (i < self.best_spans.len) {
+                if (self.exhausted) break;
+                const x = self.best_spans[i];
+                const x_id = switch (x.info) {
+                    .occurrence => |o| o.type_id,
+                    .element => {
+                        i += 1;
+                        continue;
+                    },
+                };
+                var accepted = false;
+                // Positions below `inside_until` belong to a nearest Y
+                // already tried; deeper same-type occurrences there
+                // are not nearest to X.
+                var inside_until: usize = 0;
+                var j = i + 1;
+                while (j < self.best_spans.len and self.best_spans[j].start < x.end) : (j += 1) {
+                    if (self.exhausted) break;
+                    const y = self.best_spans[j];
+                    if (y.start < inside_until) continue;
+                    const y_id = switch (y.info) {
+                        .occurrence => |o| o.type_id,
+                        .element => continue,
+                    };
+                    if (y_id != x_id or y.end > x.end) continue;
+                    inside_until = y.end;
+                    if (y.end - y.start == x.end - x.start) continue; // same extent: no change
+                    var cand: std.ArrayList(u64) = .empty;
+                    defer cand.deinit(self.allocator);
+                    for (self.best[0..x.start]) |c| try cand.append(self.allocator, c.value);
+                    for (self.best[y.start..y.end]) |c| try cand.append(self.allocator, c.value);
+                    for (self.best[x.end..]) |c| try cand.append(self.allocator, c.value);
+                    if (try self.tryAccept(cand.items, .p6_promote)) {
+                        changed_any = true;
+                        accepted = true;
+                        break;
+                    }
+                }
+                if (!accepted) i += 1;
+            }
+            return changed_any;
+        }
+
+        /// The element spans of the slice whose length draw is at
+        /// `length_pos`, counted, or the k-th of them (in order).
+        fn elementCount(self: *@This(), length_pos: usize) usize {
+            var count: usize = 0;
+            for (self.best_spans) |sp| switch (sp.info) {
+                .element => |el| if (el.length_pos == length_pos) {
+                    count += 1;
+                },
+                .occurrence => {},
+            };
+            return count;
+        }
+
+        fn elementAt(self: *@This(), length_pos: usize, k: usize) ?Span {
+            var seen: usize = 0;
+            for (self.best_spans) |sp| switch (sp.info) {
+                .element => |el| if (el.length_pos == length_pos) {
+                    if (seen == k) return sp;
+                    seen += 1;
+                },
+                .occurrence => {},
+            };
+            return null;
+        }
+
+        /// P5: element deletion paired with the length draw (design
+        /// v0.3 §3.2 item 2, D19). For each slice (by ascending length
+        /// draw position ℓ) with length v ≥ 1, try each element span
+        /// [s, e) from the last to the first: set position ℓ to v − 1
+        /// and remove [s, e). After an acceptance the same slice is
+        /// rescanned from its last element with the new best's spans
+        /// (the prefix up to ℓ is unchanged, so ℓ still names it).
+        fn passDelete(self: *@This()) !bool {
+            var changed_any = false;
+            var next_pos: usize = 0;
+            outer: while (true) {
+                if (self.exhausted) break;
+                var found: ?usize = null;
+                for (self.best_spans) |sp| switch (sp.info) {
+                    .element => |el| if (el.length_pos >= next_pos and (found == null or el.length_pos < found.?)) {
+                        found = el.length_pos;
+                    },
+                    .occurrence => {},
+                };
+                const lp = found orelse break;
+                next_pos = lp + 1;
+                var k = self.elementCount(lp);
+                while (k > 0) {
+                    if (self.exhausted) break :outer;
+                    if (lp >= self.best.len or self.best[lp].value == 0) break;
+                    const sp = self.elementAt(lp, k - 1) orelse break;
+                    var cand: std.ArrayList(u64) = .empty;
+                    defer cand.deinit(self.allocator);
+                    for (self.best[0..sp.start], 0..) |c, pos| {
+                        try cand.append(self.allocator, if (pos == lp) c.value - 1 else c.value);
+                    }
+                    for (self.best[sp.end..]) |c| try cand.append(self.allocator, c.value);
+                    if (try self.tryAccept(cand.items, .p5_delete)) {
+                        changed_any = true;
+                        k = self.elementCount(lp);
+                    } else {
+                        k -= 1;
+                    }
+                }
+            }
+            return changed_any;
+        }
+
+        /// One round (design v0.3 §3.2 item 5, D22): P6 → P5 → P1 →
+        /// P4 → P2 → P3; P1b only when that changed nothing and budget
+        /// remains. Masked-off passes are skipped (ablation only).
         fn round(self: *@This()) !bool {
             var changed = false;
-            if (try self.passChunks()) changed = true;
-            if (try self.passReexpress()) changed = true;
-            if (try self.passZero()) changed = true;
-            if (try self.passDecrease()) changed = true;
+            const m = self.options.passes;
+            if (m.p6 and try self.passPromote()) changed = true;
+            if (m.p5 and try self.passDelete()) changed = true;
+            if (m.p1 and try self.passChunks()) changed = true;
+            if (m.p4 and try self.passReexpress()) changed = true;
+            if (m.p2 and try self.passZero()) changed = true;
+            if (m.p3 and try self.passDecrease()) changed = true;
+            if (!changed and !self.exhausted and m.p1b) {
+                if (try self.passChunksExtra()) changed = true;
+            }
             return changed;
         }
     };
@@ -411,6 +640,7 @@ pub fn shrinkSpanned(
         .property = property,
         .limits = limits,
         .budget = budget,
+        .options = options,
         .best = best_copy,
         .best_keys = best_keys_copy,
         .best_skips = best_skips_copy,

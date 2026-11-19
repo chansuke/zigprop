@@ -19,6 +19,12 @@ pub const max_depth_cap = gen_mod.max_depth_cap;
 
 pub const shrink = @import("shrink.zig").shrink;
 pub const ShrinkResult = @import("shrink.zig").ShrinkResult;
+pub const shrinkSpanned = @import("shrink.zig").shrinkSpanned;
+pub const ShrinkOptions = @import("shrink.zig").ShrinkOptions;
+pub const ShrinkPassMask = @import("shrink.zig").ShrinkPassMask;
+pub const ShrinkPass = @import("shrink.zig").ShrinkPass;
+pub const AcceptEvent = @import("shrink.zig").AcceptEvent;
+pub const AcceptHook = @import("shrink.zig").AcceptHook;
 
 pub const Config = runner_mod.Config;
 pub const Report = runner_mod.Report;

@@ -151,10 +151,13 @@ fn noSeven(t: Tree) bool {
     return !hasSeven(t);
 }
 
-test "recursion: shrinking a tree failure stays path-local" {
-    // root 3 with one kid 7 with one kid 9. The reachable minimum
-    // keeps the 7 in place (shrinking cannot promote a subtree):
-    // root drops to 0 and the grandkid is deleted.
+test "recursion: shrinking a tree failure promotes the failing subtree" {
+    // root 3 with one kid 7 with one kid 9. v0.2 pinned the
+    // non-minimal {0, [{7, []}]} (keys [0, 1, 14, 0]): without subtree
+    // promotion the 7 stayed in place. That expectation is retracted
+    // (design v0.3 §3.6): P6 promotes the kid, and the unique
+    // key-order minimum is Tree{ .value = 7, .kids = &.{} }, keys
+    // [14, 0].
     const entries = [_]zigprop.Regression{.{ .id = "r", .gen_version = zigprop.generator_version, .choices = &.{ 0, 6, 1, 0, 14, 1, 0, 18, 0 } }};
     var report = try zigprop.check(std.testing.allocator, Tree, noSeven, .{
         .seed = 0,
@@ -172,10 +175,20 @@ test "recursion: shrinking a tree failure stays path-local" {
         for (report.failed.shrunk_choices, 0..) |c, i| vals[i] = c.value;
         break :blk vals[0..report.failed.shrunk_choices.len];
     }, .{}, &consumed);
-    try std.testing.expectEqual(@as(i64, 0), t.value);
-    try std.testing.expectEqual(@as(usize, 1), t.kids.len);
-    try std.testing.expectEqual(@as(i64, 7), t.kids[0].value);
-    try std.testing.expectEqual(@as(usize, 0), t.kids[0].kids.len);
+    try std.testing.expectEqual(@as(i64, 7), t.value);
+    try std.testing.expectEqual(@as(usize, 0), t.kids.len);
+    // The key sequence is [14, 0]: one integer pair (key 14, the
+    // second position skipped) and the length draw 0.
+    var src = zigprop.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
+    defer src.deinit();
+    var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = .{} };
+    _ = try zigprop.generate(Tree, &ctx);
+    var keys: std.ArrayList(u64) = .empty;
+    defer keys.deinit(std.testing.allocator);
+    for (src.recorded_keys.items, src.recorded_skip.items) |k, s| {
+        if (!s) try keys.append(std.testing.allocator, k);
+    }
+    try std.testing.expectEqualSlices(u64, &.{ 14, 0 }, keys.items);
 }
 
 test "recursion: max_depth above the comptime cap is InvalidConfig" {

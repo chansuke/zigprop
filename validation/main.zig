@@ -19,6 +19,11 @@
 //! list[int 0, int 0, int 0]. Gate: discovery >= 8/10 AND exact
 //! structural match >= 8/10.
 //!
+//! T6 tree subtree promotion and T7 slice element deletion (v0.3
+//! design §8.2): gates found >= 8/10 AND minimal (keys [14, 0] /
+//! [1, 7]) >= 8/10, controls 10/10. The P6-off / P5-off ablations
+//! and the v0.2.1 baseline (M0-e) are measurements only.
+//!
 //! Success criterion (registered in advance): for each target, at
 //! least 8 of seeds 0..9 discover a failure within max_cases = 200
 //! AND shrink to the expected minimal counterexample. A hand-written
@@ -297,8 +302,113 @@ fn isExpectedT4Minimum(v: Value) bool {
 }
 
 // ---------------------------------------------------------------------
+// T6: tree subtree promotion (design v0.3 §8.2). Tree { value: i64,
+// kids }, max_len = 4, max_depth = 3. The SUT `summarize` computes
+// (node count, wrapping value sum); the mutant miscounts any node
+// whose value is 7, so the property fails iff some node has value 7.
+// Expected minimum: Tree{ .value = 7, .kids = &.{} }, keys [14, 0].
+// ---------------------------------------------------------------------
+
+const Tree = struct { value: i64, kids: []const Tree };
+const t6_limits: zigprop.Limits = .{ .max_len = 4, .max_depth = 3 };
+
+const Summary = struct { nodes: u64, sum: i64 };
+
+fn summarize(t: Tree, mutant: bool) Summary {
+    var s: Summary = .{ .nodes = 1, .sum = t.value };
+    if (mutant and t.value == 7) s.nodes += 1;
+    for (t.kids) |k| {
+        const ks = summarize(k, mutant);
+        s.nodes += ks.nodes;
+        s.sum +%= ks.sum;
+    }
+    return s;
+}
+
+fn propT6(t: Tree, mutant: bool) bool {
+    const got = summarize(t, mutant);
+    const want = summarize(t, false);
+    return got.nodes == want.nodes and got.sum == want.sum;
+}
+
+fn propT6Mutant(t: Tree) bool {
+    return propT6(t, true);
+}
+
+fn propT6Correct(t: Tree) bool {
+    return propT6(t, false);
+}
+
+// ---------------------------------------------------------------------
+// T7: slice element deletion (design v0.3 §8.2). []const u8, default
+// limits. The SUT sums the bytes; the mutant mis-sums any element
+// equal to 7, so the property fails iff some element is 7. Expected
+// minimum: [7], keys [1, 7].
+// ---------------------------------------------------------------------
+
+fn sumBytes(xs: []const u8, mutant: bool) u64 {
+    var s: u64 = 0;
+    for (xs) |x| s += if (mutant and x == 7) 0 else x;
+    return s;
+}
+
+fn propT7(xs: []const u8, mutant: bool) bool {
+    return sumBytes(xs, mutant) == sumBytes(xs, false);
+}
+
+fn propT7Mutant(xs: []const u8) bool {
+    return propT7(xs, true);
+}
+
+fn propT7Correct(xs: []const u8) bool {
+    return propT7(xs, false);
+}
+
+// ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------
+
+/// Replays `choices` for T and returns the value plus its filtered key
+/// sequence (skip positions removed), arena-owned.
+fn replayWithKeys(comptime T: type, arena: std.mem.Allocator, choices: []const zigprop.Choice, limits: zigprop.Limits) !struct { value: T, keys: []u64 } {
+    var src = zigprop.Source.initReplay(arena, choices, 100_000);
+    var ctx = zigprop.GenContext{ .src = &src, .allocator = arena, .limits = limits };
+    const v = try zigprop.generate(T, &ctx);
+    var keys: std.ArrayList(u64) = .empty;
+    for (src.recorded_keys.items, src.recorded_skip.items) |k, s| {
+        if (!s) try keys.append(arena, k);
+    }
+    return .{ .value = v, .keys = keys.items };
+}
+
+/// Shrinks a confirmed failing sequence with an internal pass mask
+/// (the T6/T7 ablations, measurement only). The initial keys, skips
+/// and spans come from replaying the sequence, which is exactly what
+/// the runner hands the shrinker. Returns the filtered keys of the
+/// shrunk sequence (arena-owned) and the shrink statistics.
+fn shrinkMasked(comptime T: type, arena: std.mem.Allocator, property: *const fn (T) bool, limits: zigprop.Limits, choices: []const zigprop.Choice, mask: zigprop.ShrinkPassMask) !struct { keys: []u64, evaluations: usize, outcome: zigprop.ShrinkOutcome } {
+    var src = zigprop.Source.initReplay(arena, choices, 100_000);
+    var ctx = zigprop.GenContext{ .src = &src, .allocator = arena, .limits = limits };
+    _ = try zigprop.generate(T, &ctx);
+    const r = try zigprop.shrinkSpanned(arena, T, null, property, limits, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, "", .{ .passes = mask });
+    const rep = try replayWithKeys(T, arena, r.choices, limits);
+    return .{ .keys = rep.keys, .evaluations = r.evaluations, .outcome = r.outcome };
+}
+
+fn treeDesc(buf: []u8, t: Tree) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    writeTree(&w, t) catch return "(long)";
+    return w.buffered();
+}
+
+fn writeTree(w: *std.Io.Writer, t: Tree) !void {
+    try w.print("{{{d},[", .{t.value});
+    for (t.kids, 0..) |k, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeTree(w, k);
+    }
+    try w.writeAll("]}");
+}
 
 fn replayU32(allocator: std.mem.Allocator, choices: []const zigprop.Choice) !u32 {
     var src = zigprop.Source.initReplay(allocator, choices, 100_000);
@@ -534,5 +644,100 @@ pub fn main(init: std.process.Init) !void {
     out.print("T4: discovered {d}/10, exact list[int 0 x3] {d}/10, control passed {d}/10\n", .{ t4_discovered, t4_exact, t4_control_ok });
     out.print("T4 criterion (>=8 discovered AND >=8 exact): {s}\n", .{
         if (t4_discovered >= 8 and t4_exact >= 8) "MET" else "NOT MET",
+    });
+
+    // ---------------- T6 ----------------
+    out.print("\n== T6 tree subtree promotion (mutant: a node with value 7 is miscounted) ==\n", .{});
+    out.print("seed | v0.3: cases, root=7 originally, shrunk, evals, outcome | P6 off (measurement): keys len, evals\n", .{});
+    var t6_found: usize = 0;
+    var t6_min: usize = 0;
+    var t6_ctl: usize = 0;
+    var t6_root7: usize = 0;
+    var t6_exhausted: usize = 0;
+    var t6_p6off_min: usize = 0;
+    var t6_evals_total: usize = 0;
+    for (0..10) |seed| {
+        var r = try zigprop.check(allocator, Tree, propT6Mutant, .{ .seed = seed, .max_cases = 200, .limits = t6_limits });
+        defer r.deinit();
+        switch (r) {
+            .failed => |f| {
+                t6_found += 1;
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const orig = try replayWithKeys(Tree, a, f.choices, t6_limits);
+                const rep = try replayWithKeys(Tree, a, f.shrunk_choices, t6_limits);
+                const minimal = std.mem.eql(u64, rep.keys, &.{ 14, 0 });
+                if (minimal) t6_min += 1;
+                const root7 = orig.value.value == 7;
+                if (root7) t6_root7 += 1;
+                if (f.shrink_outcome == .budget_exhausted) t6_exhausted += 1;
+                t6_evals_total += f.shrink_evaluations;
+                const off = try shrinkMasked(Tree, a, propT6Mutant, t6_limits, f.choices, .{ .p6 = false });
+                const off_min = std.mem.eql(u64, off.keys, &.{ 14, 0 });
+                if (off_min) t6_p6off_min += 1;
+                var buf: [256]u8 = undefined;
+                out.print("{d:>4} | cases {d}, root7 {}, shrunk {s}{s}, evals {d}, {s} | P6 off: keys {d}{s}, evals {d}\n", .{
+                    seed,         f.attempt_index + 1,               root7,           treeDesc(&buf, rep.value), if (minimal) " (minimal)" else "", f.shrink_evaluations, @tagName(f.shrink_outcome),
+                    off.keys.len, if (off_min) " (minimal)" else "", off.evaluations,
+                });
+            },
+            else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
+        }
+        var c = try zigprop.check(allocator, Tree, propT6Correct, .{ .seed = seed, .max_cases = 200, .limits = t6_limits });
+        defer c.deinit();
+        if (std.meta.activeTag(c) == .passed) t6_ctl += 1;
+    }
+    out.print("T6: discovered {d}/10, minimal {{7,[]}} {d}/10, control passed {d}/10\n", .{ t6_found, t6_min, t6_ctl });
+    out.print("T6 measurements: original root=7 {d}, budget exhausted {d}, total evals {d}; P6 off minimal {d}/{d}; v0.2.1 (M0-e): found 10/10, minimal 0/10\n", .{ t6_root7, t6_exhausted, t6_evals_total, t6_p6off_min, t6_found });
+    out.print("T6 criterion (>=8 discovered AND >=8 minimal, control 10/10): {s}\n", .{
+        if (t6_found >= 8 and t6_min >= 8 and t6_ctl == 10) "MET" else "NOT MET",
+    });
+
+    // ---------------- T7 ----------------
+    out.print("\n== T7 slice element deletion (mutant: an element 7 is mis-summed) ==\n", .{});
+    out.print("seed | v0.3: cases, original len, first=7, shrunk, evals, outcome | P5 off (measurement): keys, evals\n", .{});
+    var t7_found: usize = 0;
+    var t7_min: usize = 0;
+    var t7_ctl: usize = 0;
+    var t7_first7: usize = 0;
+    var t7_exhausted: usize = 0;
+    var t7_p5off_min: usize = 0;
+    var t7_evals_total: usize = 0;
+    for (0..10) |seed| {
+        var r = try zigprop.check(allocator, []const u8, propT7Mutant, .{ .seed = seed, .max_cases = 200 });
+        defer r.deinit();
+        switch (r) {
+            .failed => |f| {
+                t7_found += 1;
+                var arena = std.heap.ArenaAllocator.init(allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const orig = try replayWithKeys([]const u8, a, f.choices, .{});
+                const rep = try replayWithKeys([]const u8, a, f.shrunk_choices, .{});
+                const minimal = std.mem.eql(u64, rep.keys, &.{ 1, 7 });
+                if (minimal) t7_min += 1;
+                const first7 = orig.value.len > 0 and orig.value[0] == 7;
+                if (first7) t7_first7 += 1;
+                if (f.shrink_outcome == .budget_exhausted) t7_exhausted += 1;
+                t7_evals_total += f.shrink_evaluations;
+                const off = try shrinkMasked([]const u8, a, propT7Mutant, .{}, f.choices, .{ .p5 = false });
+                const off_min = std.mem.eql(u64, off.keys, &.{ 1, 7 });
+                if (off_min) t7_p5off_min += 1;
+                out.print("{d:>4} | cases {d}, len {d}, first7 {}, shrunk {any}{s}, evals {d}, {s} | P5 off: keys {any}{s}, evals {d}\n", .{
+                    seed,     f.attempt_index + 1,               orig.value.len,  first7, rep.value, if (minimal) " (minimal)" else "", f.shrink_evaluations, @tagName(f.shrink_outcome),
+                    off.keys, if (off_min) " (minimal)" else "", off.evaluations,
+                });
+            },
+            else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
+        }
+        var c = try zigprop.check(allocator, []const u8, propT7Correct, .{ .seed = seed, .max_cases = 200 });
+        defer c.deinit();
+        if (std.meta.activeTag(c) == .passed) t7_ctl += 1;
+    }
+    out.print("T7: discovered {d}/10, minimal [7] {d}/10, control passed {d}/10\n", .{ t7_found, t7_min, t7_ctl });
+    out.print("T7 measurements: original first=7 {d}, budget exhausted {d}, total evals {d}; P5 off minimal {d}/{d}; v0.2.1 (M0-e): found 10/10, minimal 8/10\n", .{ t7_first7, t7_exhausted, t7_evals_total, t7_p5off_min, t7_found });
+    out.print("T7 criterion (>=8 discovered AND >=8 minimal [7], control 10/10): {s}\n", .{
+        if (t7_found >= 8 and t7_min >= 8 and t7_ctl == 10) "MET" else "NOT MET",
     });
 }
