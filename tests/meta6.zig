@@ -14,9 +14,10 @@ const GenContext = zigprop.GenContext;
 fn genFromValues(comptime T: type, values: []const u64) !T {
     var buf: [8]Choice = undefined;
     for (values, 0..) |v, i| buf[i] = .{ .bound = 0, .value = v };
-    var src = zigprop.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     return zigprop.generate(T, &ctx);
 }
 
@@ -53,9 +54,10 @@ test "unions: non-exhaustive tags generate named variants only" {
     try std.testing.expect(std.meta.activeTag(vy) == .y);
     // Random draws only ever produce x or y (the tag draw ranges
     // over the declared fields, not the tag enum's value space).
-    var src = zigprop.Source.initRandom(std.testing.allocator, zigprop.deriveSeed(5, 0), 100_000);
+    var src = zigprop.internal.Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(5, 0), 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     for (0..200) |_| {
         const v = try zigprop.generate(NE, &ctx);
         try std.testing.expect(std.meta.activeTag(v) == .x or std.meta.activeTag(v) == .y);
@@ -86,9 +88,10 @@ test "unions: key count beats declaration order (MF4)" {
     try std.testing.expect(std.meta.activeTag(report) == .failed);
     try std.testing.expect(report.failed.regression_index != null);
     try std.testing.expectEqual(@as(usize, 1), report.failed.shrunk_choices.len);
-    var src = zigprop.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     const v = try zigprop.generate(BigOrNone, &ctx);
     try std.testing.expect(std.meta.activeTag(v) == .none);
 }
@@ -111,9 +114,10 @@ test "unions: the tag index breaks ties between equal key counts" {
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
     try std.testing.expect(report.failed.regression_index != null);
-    var src = zigprop.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     const v = try zigprop.generate(TwoVoids, &ctx);
     try std.testing.expect(std.meta.activeTag(v) == .a);
 }
@@ -138,9 +142,10 @@ test "unions: check discovers a failing variant" {
     var report = try zigprop.check(std.testing.allocator, U, prop, .{ .seed = 0 });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
-    var src = zigprop.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, report.failed.shrunk_choices, 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     const v = try zigprop.generate(U, &ctx);
     try std.testing.expect(std.meta.activeTag(v) == .b);
 }

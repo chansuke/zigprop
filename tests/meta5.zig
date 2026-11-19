@@ -12,7 +12,7 @@ const zigprop = @import("zigprop");
 const Choice = zigprop.Choice;
 const GenContext = zigprop.GenContext;
 
-fn expectRecorded(src: *zigprop.Source, choices: []const Choice, keys: []const u64, skips: []const bool) !void {
+fn expectRecorded(src: *zigprop.internal.Source, choices: []const Choice, keys: []const u64, skips: []const bool) !void {
     try std.testing.expectEqualSlices(Choice, choices, src.recorded.items);
     try std.testing.expectEqualSlices(u64, keys, src.recorded_keys.items);
     try std.testing.expectEqualSlices(bool, skips, src.recorded_skip.items);
@@ -20,9 +20,10 @@ fn expectRecorded(src: *zigprop.Source, choices: []const Choice, keys: []const u
 
 test "golden: struct { u32, i16, bool } at seed 42" {
     const S = struct { a: u32, b: i16, c: bool };
-    var src = zigprop.Source.initRandom(std.testing.allocator, zigprop.deriveSeed(42, 0), 100_000);
+    var src = zigprop.internal.Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(42, 0), 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     const v = try zigprop.generate(S, &ctx);
     try std.testing.expectEqual(@as(u32, 22188), v.a);
     try std.testing.expectEqual(@as(i16, -1), v.b);
@@ -35,11 +36,12 @@ test "golden: struct { u32, i16, bool } at seed 42" {
 }
 
 test "golden: []const u8 at seed 2 with max_len 4" {
-    var src = zigprop.Source.initRandom(std.testing.allocator, zigprop.deriveSeed(2, 0), 100_000);
+    var src = zigprop.internal.Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(2, 0), 100_000);
     defer src.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = .{ .max_len = 4 } };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), .{ .max_len = 4 });
     const v = try zigprop.generate([]const u8, &ctx);
     try std.testing.expectEqualSlices(u8, &.{ 86, 156, 1 }, v);
     try expectRecorded(&src, &.{
@@ -57,17 +59,19 @@ test "golden: []const u8 at seed 2 with max_len 4" {
 // Floats (design v0.2 §1)
 // ---------------------------------------------------------------------
 
-fn genFromValues(comptime T: type, values: []const u64, src_out: *zigprop.Source) !T {
+fn genFromValues(comptime T: type, values: []const u64, src_out: *zigprop.internal.Source) !T {
     var buf: [4]Choice = undefined;
     for (values, 0..) |v, i| buf[i] = .{ .bound = 0, .value = v };
-    src_out.* = zigprop.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
-    var ctx = GenContext{ .src = src_out, .allocator = std.testing.allocator, .limits = .{} };
+    src_out.* = zigprop.internal.Source.initReplay(std.testing.allocator, buf[0..values.len], 100_000);
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, src_out, std.testing.allocator, .{});
     return zigprop.generate(T, &ctx);
 }
 
-fn genFromChoices(comptime T: type, choices: []const Choice, src_out: *zigprop.Source) !T {
-    src_out.* = zigprop.Source.initReplay(std.testing.allocator, choices, 100_000);
-    var ctx = GenContext{ .src = src_out, .allocator = std.testing.allocator, .limits = .{} };
+fn genFromChoices(comptime T: type, choices: []const Choice, src_out: *zigprop.internal.Source) !T {
+    src_out.* = zigprop.internal.Source.initReplay(std.testing.allocator, choices, 100_000);
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, src_out, std.testing.allocator, .{});
     return zigprop.generate(T, &ctx);
 }
 
@@ -99,7 +103,7 @@ test "floats: f16 class-3 is exhaustive — every rank yields its canonical valu
     // the genuine infinity rank); NaN is never produced.
     var counts: [65536]u32 = @splat(0);
     for (0..65536) |rank| {
-        var src: zigprop.Source = undefined;
+        var src: zigprop.internal.Source = undefined;
         const v = try genFromValues(f16, &.{ 3, @intCast(rank) }, &src);
         defer src.deinit();
         try std.testing.expect(!std.math.isNan(v));
@@ -123,7 +127,7 @@ test "floats: f16 class-3 is exhaustive — every rank yields its canonical valu
 
 test "floats: f32/f64 landmark ranks produce the landmark values" {
     inline for (.{ f32, f64 }) |T| {
-        var src: zigprop.Source = undefined;
+        var src: zigprop.internal.Source = undefined;
         // rank 0 -> +0.0, rank 1 -> -0.0, rank 2 -> least subnormal
         const zp = try genFromValues(T, &.{ 3, 0 }, &src);
         src.deinit();
@@ -155,7 +159,7 @@ test "floats: f32/f64 landmark ranks produce the landmark values" {
 }
 
 test "floats: all-zero draws produce +0.0" {
-    var src: zigprop.Source = undefined;
+    var src: zigprop.internal.Source = undefined;
     const v = try genFromValues(f64, &.{ 0, 0 }, &src);
     defer src.deinit();
     try std.testing.expectEqual(@as(f64, 0.0), v);
@@ -166,7 +170,7 @@ test "floats: all-zero draws produce +0.0" {
 test "floats: the boundary class contains the landmarks" {
     var seen: [14]f64 = @splat(0);
     for (0..14) |idx| {
-        var src: zigprop.Source = undefined;
+        var src: zigprop.internal.Source = undefined;
         seen[idx] = try genFromValues(f64, &.{ 1, @intCast(idx) }, &src);
         src.deinit();
     }
@@ -191,7 +195,7 @@ test "floats: the boundary class contains the landmarks" {
 }
 
 test "floats: the grid class hits exact dyadic values" {
-    var src: zigprop.Source = undefined;
+    var src: zigprop.internal.Source = undefined;
     const a = try genFromValues(f32, &.{ 2, 1 }, &src);
     src.deinit();
     try std.testing.expectEqual(@as(f32, 0.125), a);
@@ -222,7 +226,7 @@ test "floats: a class-0 regression shrinks to exactly 1.0" {
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
     try std.testing.expect(report.failed.regression_index != null);
-    var src: zigprop.Source = undefined;
+    var src: zigprop.internal.Source = undefined;
     const v = try genFromChoices(f32, report.failed.shrunk_choices, &src);
     src.deinit();
     try std.testing.expectEqual(@as(f32, 1.0), v);
@@ -256,7 +260,7 @@ test "floats: check discovers infinity for x - x == 0 and shrinks to it" {
     var report = try zigprop.check(std.testing.allocator, f64, selfSubtractIsZero, .{ .seed = 0 });
     defer report.deinit();
     try std.testing.expect(std.meta.activeTag(report) == .failed);
-    var src: zigprop.Source = undefined;
+    var src: zigprop.internal.Source = undefined;
     const v = try genFromChoices(f64, report.failed.shrunk_choices, &src);
     src.deinit();
     try std.testing.expect(std.math.isInf(v));
@@ -277,11 +281,12 @@ test "floats: NaN is never generated under random draws" {
 
 test "floats: nested in structs and slices" {
     const S = struct { x: f32, ys: []const f16 };
-    var src = zigprop.Source.initRandom(std.testing.allocator, zigprop.deriveSeed(3, 0), 100_000);
+    var src = zigprop.internal.Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(3, 0), 100_000);
     defer src.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = arena.allocator(), .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), .{});
     const v = try zigprop.generate(S, &ctx);
     try std.testing.expect(!std.math.isNan(v.x));
     for (v.ys) |y| try std.testing.expect(!std.math.isNan(y));
