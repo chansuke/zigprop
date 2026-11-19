@@ -1,6 +1,6 @@
 //! Benchmark / profiling harness for zigprop's core.
 //!
-//! Run: `zig build bench` (full) or `zig build bench -- --smoke` (CI).
+//! Run: `zig build bench` (full) or `zig build bench -Dsmoke` (CI).
 //! The harness measures the Source layer, which every generated value
 //! pays for: one recorded draw per choice. See docs/profiling.md for
 //! perf/flamegraph workflows on top of this binary.

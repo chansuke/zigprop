@@ -25,14 +25,21 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(meta_tests).step);
 
-    // Benchmark / profiling harness (bench/main.zig), always ReleaseFast.
+    // Benchmark / profiling harness (bench/main.zig). Both the harness
+    // and the library module it measures are ReleaseFast, regardless of
+    // the global -Doptimize setting.
+    const mod_fast = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
     const bench_exe = b.addExecutable(.{
         .name = "zigprop-bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/main.zig"),
             .target = target,
             .optimize = .ReleaseFast,
-            .imports = &.{.{ .name = "zigprop", .module = mod }},
+            .imports = &.{.{ .name = "zigprop", .module = mod_fast }},
         }),
     });
     const bench_step = b.step("bench", "Run benchmarks");

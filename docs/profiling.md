@@ -25,8 +25,9 @@ Current benchmarks:
 | `deriveSeed` | per-attempt seed derivation (SplitMix64 mix) |
 
 Baselines are recorded in `bench/BASELINE.md` per machine; treat them as
-indicative, not as regression gates. CI runs the smoke mode only to keep
-the harness working.
+indicative, not as regression gates. CI runs the smoke mode on every
+push (ci.yml) to keep the harness working, and the full suite on
+bench/src changes and on demand (bench.yml).
 
 ## perf / flamegraphs (Linux)
 

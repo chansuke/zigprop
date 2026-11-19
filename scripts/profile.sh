@@ -4,20 +4,25 @@
 # Usage: scripts/profile.sh [--smoke]
 set -e
 cd "$(dirname "$0")/.."
-export PATH="$HOME/workspace/tools/bin:$PATH"
+if ! command -v zig >/dev/null 2>&1; then
+    # Local fallback for the development VM's install location.
+    export PATH="$HOME/workspace/tools/bin:$PATH"
+fi
 
-zig build -Doptimize=ReleaseFast bench-bin
-BIN=$(find zig-out -name 'zigprop-bench' -type f | head -1)
+zig build bench-bin
+BIN="zig-out/bin/zigprop-bench"
 echo "binary: $BIN"
 
 if command -v perf >/dev/null 2>&1; then
     echo "== perf stat =="
-    perf stat -e cycles,instructions,cache-misses,branch-misses -- "$BIN" "$@"
-    echo
-    echo "For a flamegraph:"
-    echo "  perf record -g -- $BIN"
-    echo "  perf script | stackcollapse-perf.pl | flamegraph.pl > flame.svg"
-else
-    echo "perf not found; running plain bench (see docs/profiling.md)"
-    "$BIN" "$@"
+    if perf stat -e cycles,instructions,cache-misses,branch-misses -- "$BIN" "$@"; then
+        echo
+        echo "For a flamegraph:"
+        echo "  perf record -g -- $BIN"
+        echo "  perf script | stackcollapse-perf.pl | flamegraph.pl > flame.svg"
+        exit 0
+    fi
+    echo "perf failed (permissions or unsupported events); falling back to a plain run"
 fi
+echo "running plain bench (see docs/profiling.md)"
+"$BIN" "$@"
