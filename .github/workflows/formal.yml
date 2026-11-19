@@ -42,9 +42,12 @@ jobs:
         run: |
           curl -sL -o /tmp/tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-      - name: Run TLC
+      - name: Run TLC (all configurations)
         working-directory: formal/tla
         run: |
-          java -jar /tmp/tla2tools.jar -config ZigpropRunner.cfg ZigpropRunner.tla \
-            | tee /tmp/tlc.out
-          grep -q "Model checking completed. No error has been found." /tmp/tlc.out
+          for cfg in ZigpropRunner.cfg ZigpropRunnerEmpty.cfg ZigpropRunnerZero.cfg; do
+            echo "== $cfg"
+            java -jar /tmp/tla2tools.jar -config "$cfg" ZigpropRunner.tla \
+              | tee "/tmp/tlc-$cfg.out"
+            grep -q "Model checking completed. No error has been found." "/tmp/tlc-$cfg.out"
+          done
