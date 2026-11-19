@@ -14,7 +14,7 @@ Vendored from the author's research notes on 2026-11-19 so the repository is sel
 
 - 対象: **float 生成、tagged union 生成、再帰型生成**（計画メモで v0.2 と決めた3点）。
 - 対象外: stateful testing（v0.3 以降）、slice 以外のポインタ（従来どおり）、`forAll`（名前は予約のまま）、regressions.zon の実行時パース（§6 の D11）。
-- 互換性（SF5 で限定）: 既存型の生成列は一切変えないことを、golden replay テスト（消費列・キー・skip・表示文字列を固定）で担保する。`generator_version` は 1 のまま。`Limits` への既定値つきフィールド追加は、フィールド名指定リテラルについてはソース互換を意図するが、reflection 経由では新フィールドが見えることを明記し、万能の互換は主張しない。再帰型の regressions は `max_depth` 等の Limits に依存する（§3.4）。
+- 互換性（SF5 で限定）: 既存型の生成列は一切変えないことを、golden replay テスト（消費列・キー・skip を固定。表示文字列は固定していない: この括弧内の当初の「表示文字列」は事実と違ったため v0.3 設計 §7.4 / F1 で撤回した。表示は std の `{any}` / `{f}` に依存し、互換性の面ではない）で担保する。`generator_version` は 1 のまま。`Limits` への既定値つきフィールド追加は、フィールド名指定リテラルについてはソース互換を意図するが、reflection 経由では新フィールドが見えることを明記し、万能の互換は主張しない。再帰型の regressions は `max_depth` 等の Limits に依存する（§3.4）。
 
 ## 1. Float（f16 / f32 / f64）
 
