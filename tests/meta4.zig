@@ -17,18 +17,20 @@ fn belowVarintLimit(x: u32) bool {
 }
 
 fn replayValue(choices: []const Choice) !u32 {
-    var src = zigprop.Source.initReplay(std.testing.allocator, choices, 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, choices, 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     return zigprop.generate(u32, &ctx);
 }
 
 test "v2.1: integer pairs are annotated with the value rank as key" {
     // [1, 2] = boundary class, index 2 -> value 2^32 - 2.
     const seq = [_]Choice{ .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 2 } };
-    var src = zigprop.Source.initReplay(std.testing.allocator, &seq, 100_000);
+    var src = zigprop.internal.Source.initReplay(std.testing.allocator, &seq, 100_000);
     defer src.deinit();
-    var ctx = GenContext{ .src = &src, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, std.testing.allocator, .{});
     const v = try zigprop.generate(u32, &ctx);
     try std.testing.expectEqual(@as(u32, 4294967294), v);
     try std.testing.expectEqual(@as(u64, 4294967294), src.recorded_keys.items[0]);

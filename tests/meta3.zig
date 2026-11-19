@@ -2,13 +2,14 @@
 
 const std = @import("std");
 const zigprop = @import("zigprop");
-const Source = zigprop.Source;
+const Source = zigprop.internal.Source;
+const GenState = zigprop.internal.GenState;
 const Choice = zigprop.Choice;
 const GenContext = zigprop.GenContext;
 
 fn singleDraw(ctx: *GenContext) anyerror!u32 {
     // The dedicated single-choice encoding of design §8.
-    return @intCast(ctx.src.range(1 << 32));
+    return @intCast(ctx.range(1 << 32));
 }
 
 fn smallOnly(x: u32) bool {
@@ -81,12 +82,14 @@ test "shrink: built-in integers — failure preserved, value not larger (design 
 
     var rep1 = Source.initReplay(std.testing.allocator, f.choices, 100_000);
     defer rep1.deinit();
-    var ctx1 = GenContext{ .src = &rep1, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx1_state: GenState = undefined;
+    var ctx1 = zigprop.internal.genContextForTest(&ctx1_state, &rep1, std.testing.allocator, .{});
     const original = try zigprop.generate(u32, &ctx1);
 
     var rep2 = Source.initReplay(std.testing.allocator, f.shrunk_choices, 100_000);
     defer rep2.deinit();
-    var ctx2 = GenContext{ .src = &rep2, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx2_state: GenState = undefined;
+    var ctx2 = zigprop.internal.genContextForTest(&ctx2_state, &rep2, std.testing.allocator, .{});
     const shrunk = try zigprop.generate(u32, &ctx2);
 
     try std.testing.expect(!smallOnly(shrunk));
@@ -120,7 +123,8 @@ test "shrink: slices shrink to a shortlex-smaller still-failing sequence" {
     // The shrunk sequence still regenerates a failing slice.
     var rep = Source.initReplay(std.testing.allocator, f.shrunk_choices, 100_000);
     defer rep.deinit();
-    var ctx = GenContext{ .src = &rep, .allocator = std.testing.allocator, .limits = .{} };
+    var ctx_state: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&ctx_state, &rep, std.testing.allocator, .{});
     const v = try zigprop.generate([]const u8, &ctx);
     defer std.testing.allocator.free(v);
     try std.testing.expect(!allBytesSmall(v));
@@ -136,7 +140,7 @@ test "shrink: initialization OOM does not leak the copied sequence" {
     // must not leak the first three.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
     const initial = [_]Choice{.{ .bound = 10, .value = 7 }};
-    try std.testing.expectError(error.OutOfMemory, zigprop.shrink(
+    try std.testing.expectError(error.OutOfMemory, zigprop.internal.shrink(
         failing.allocator(),
         u32,
         null,
@@ -153,7 +157,7 @@ test "shrink: initialization OOM does not leak the copied sequence" {
 var sticky_gen_calls: usize = 0;
 fn stickyThenDiscard(ctx: *GenContext) anyerror!u32 {
     sticky_gen_calls += 1;
-    _ = ctx.src.range(10);
+    _ = ctx.range(10);
     ctx.src.sticky_error = error.OutOfMemory; // a recording failure landed
     return error.InvalidGeneration;
 }
@@ -173,7 +177,7 @@ test "classification: sticky error outranks InvalidGeneration (MF5)" {
 var boom_calls: usize = 0;
 fn failThenBoom(ctx: *GenContext) anyerror!u32 {
     boom_calls += 1;
-    if (boom_calls == 1) return @intCast(ctx.src.range(1 << 32));
+    if (boom_calls == 1) return @intCast(ctx.range(1 << 32));
     return error.Boom;
 }
 
@@ -189,7 +193,7 @@ test "shrink: a generator error during shrinking propagates, never becomes an ou
 var counting_calls: usize = 0;
 fn countingDraw(ctx: *GenContext) anyerror!u32 {
     counting_calls += 1;
-    return @intCast(ctx.src.range(1 << 32));
+    return @intCast(ctx.range(1 << 32));
 }
 
 test "shrink: reported evaluations equal actual generator calls" {
@@ -266,7 +270,7 @@ test "shrink: an empty failing sequence is already a fixed point" {
 fn drawUntilZero(ctx: *GenContext) anyerror![]const u32 {
     var list: std.ArrayList(u32) = .empty;
     while (true) {
-        const v: u32 = @intCast(ctx.src.range(100));
+        const v: u32 = @intCast(ctx.range(100));
         if (v == 0) break;
         try list.append(ctx.allocator, v);
     }
