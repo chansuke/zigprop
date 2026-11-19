@@ -54,6 +54,19 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zigprop", .module = mod_fast }},
         }),
     });
+    // Pre-registered validation targets (design §9): `zig build validation`.
+    const validation_exe = b.addExecutable(.{
+        .name = "zigprop-validation",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("validation/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "zigprop", .module = mod_fast }},
+        }),
+    });
+    const validation_step = b.step("validation", "Run the §9 validation targets (T1 varint, T2 RLE)");
+    validation_step.dependOn(&b.addRunArtifact(validation_exe).step);
+
     const bench_step = b.step("bench", "Run benchmarks");
     const run_bench = b.addRunArtifact(bench_exe);
     const smoke = b.option(bool, "smoke", "Run benchmarks in smoke mode (CI)") orelse false;
