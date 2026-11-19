@@ -4,14 +4,15 @@
 //! Each attempt is classified as pass / fail / discard / infrastructure
 //! error (MF5). Only a confirmed fail is snapshotted into result-owned
 //! storage (MF9); infrastructure errors propagate out of `check`
-//! immediately. Shrinking (§6) is milestone 3: until then a failed
-//! report carries `shrink_outcome = .not_attempted` and the shrunk
-//! fields mirror the original counterexample.
+//! immediately. A confirmed failure — from random search or from a
+//! regression entry — goes through the §6 shrinker before the report
+//! is built.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const source = @import("source.zig");
 const gen = @import("gen.zig");
+const shrink_mod = @import("shrink.zig");
 const Choice = source.Choice;
 const GenContext = source.GenContext;
 const Limits = source.Limits;
@@ -40,11 +41,7 @@ pub const Config = struct {
     regression_id: ?[]const u8 = null,
 };
 
-pub const ShrinkOutcome = enum {
-    not_attempted,
-    fixed_point,
-    budget_exhausted,
-};
+pub const ShrinkOutcome = shrink_mod.ShrinkOutcome;
 
 pub const Report = union(enum) {
     passed: struct {
@@ -125,70 +122,41 @@ pub fn checkOrError(
         .failed => |f| {
             std.debug.print("zigprop: property failed (seed {d}, attempt {d})\n", .{ f.seed, f.attempt_index });
             std.debug.print("  value: {s}\n", .{f.original_value});
-            std.debug.print("  choice values:", .{});
-            for (f.choices) |c| std.debug.print(" {d}", .{c.value});
+            std.debug.print("  shrunk value: {s} (shrink: {s}, {d} evaluations)\n", .{ f.shrunk_value, @tagName(f.shrink_outcome), f.shrink_evaluations });
+            std.debug.print("  shrunk choice values:", .{});
+            for (f.shrunk_choices) |c| std.debug.print(" {d}", .{c.value});
             std.debug.print("\n", .{});
             return error.PropertyFailed;
         },
     }
 }
 
-const AttemptResult = union(enum) {
-    pass,
-    discard,
-    fail: struct {
-        choices: []Choice,
-        value_display: []u8,
-    },
-};
-
-fn evaluateAttempt(
-    result_allocator: Allocator,
+fn makeFailed(
+    allocator: Allocator,
     comptime T: type,
     generator: ?*const fn (*GenContext) anyerror!T,
     property: *const fn (T) bool,
-    src: *Source,
-    attempt_allocator: Allocator,
-    limits: Limits,
-) !AttemptResult {
-    var ctx = GenContext{ .src = src, .allocator = attempt_allocator, .limits = limits };
-    const value = (if (generator) |g| g(&ctx) else gen.generate(T, &ctx)) catch |err| {
-        if (err == error.InvalidGeneration) return .discard;
-        return err; // infrastructure error: propagate (MF5)
-    };
-    if (src.sticky_error) |err| return err;
-    if (src.limit_exceeded) return .discard;
-    if (src.exhausted) return .discard; // replay no longer matches the generator
-    if (property(value)) return .pass;
-    // Confirmed failure: snapshot into result-owned storage before the
-    // attempt arena is destroyed (MF9).
-    const choices = try result_allocator.dupe(Choice, src.recorded.items);
-    errdefer result_allocator.free(choices);
-    const display = try std.fmt.allocPrint(result_allocator, "{any}", .{value});
-    return .{ .fail = .{ .choices = choices, .value_display = display } };
-}
-
-fn makeFailed(
-    allocator: Allocator,
     config: Config,
     attempt_index: usize,
     regression_index: ?usize,
-    fail: @FieldType(AttemptResult, "fail"),
+    fail: @FieldType(shrink_mod.AttemptResult, "fail"),
 ) !Report {
-    const shrunk_choices = try allocator.dupe(Choice, fail.choices);
-    errdefer allocator.free(shrunk_choices);
-    const shrunk_value = try allocator.dupe(u8, fail.value_display);
+    const sr = shrink_mod.shrink(allocator, T, generator, property, config.limits, config.shrink_budget, fail.choices, fail.value_display) catch |err| {
+        allocator.free(fail.choices);
+        allocator.free(fail.value_display);
+        return err;
+    };
     return .{ .failed = .{
         .allocator = allocator,
         .seed = config.seed,
         .attempt_index = attempt_index,
         .regression_index = regression_index,
         .choices = fail.choices,
-        .shrunk_choices = shrunk_choices,
+        .shrunk_choices = sr.choices,
         .original_value = fail.value_display,
-        .shrunk_value = shrunk_value,
-        .shrink_evaluations = 0,
-        .shrink_outcome = .not_attempted,
+        .shrunk_value = sr.value_display,
+        .shrink_evaluations = sr.evaluations,
+        .shrink_outcome = sr.outcome,
     } };
 }
 
@@ -226,14 +194,14 @@ fn run(
             }
             var src = Source.initReplay(aa, replay_choices, config.limits.max_draws);
             defer src.deinit();
-            const result = try evaluateAttempt(allocator, T, generator, property, &src, aa, config.limits);
+            const result = try shrink_mod.evaluateAttempt(allocator, T, generator, property, &src, aa, config.limits);
             switch (result) {
                 .pass => regressions_passed += 1,
                 .discard => {
                     stale_regressions += 1;
                     std.debug.print("zigprop: regression '{s}' no longer reproduces (discarded on replay); treating as stale\n", .{entry.id});
                 },
-                .fail => |f| return makeFailed(allocator, config, 0, idx, f),
+                .fail => |f| return makeFailed(allocator, T, generator, property, config, 0, idx, f),
             }
         }
     }
@@ -265,11 +233,11 @@ fn run(
         const aa = arena.allocator();
         var src = Source.initRandom(aa, source.deriveSeed(config.seed, @intCast(attempt)), config.limits.max_draws);
         defer src.deinit();
-        const result = try evaluateAttempt(allocator, T, generator, property, &src, aa, config.limits);
+        const result = try shrink_mod.evaluateAttempt(allocator, T, generator, property, &src, aa, config.limits);
         switch (result) {
             .pass => cases += 1,
             .discard => discards += 1,
-            .fail => |f| return makeFailed(allocator, config, attempt, null, f),
+            .fail => |f| return makeFailed(allocator, T, generator, property, config, attempt, null, f),
         }
         attempt += 1;
     }
