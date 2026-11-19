@@ -102,6 +102,11 @@ pub const Source = struct {
     /// requested bound (`value % bound`, or verbatim for the sentinel).
     pub fn range(self: *Source, bound: u64) u64 {
         self.draws += 1;
+        if (self.limit_exceeded) {
+            // The attempt is already a discard; stop recording so the
+            // recorded sequence stays bounded by max_draws + 1 entries.
+            return 0;
+        }
         if (self.draws > self.max_draws) {
             self.limit_exceeded = true;
             self.record(.{ .bound = bound, .value = 0 });
@@ -164,6 +169,9 @@ test "deriveSeed fixed values" {
     try std.testing.expectEqual(@as(u64, 0xa759_ea27_d472_7622), deriveSeed(42, 0));
     try std.testing.expectEqual(@as(u64, 0x37e9_671c_4537_6d5d), deriveSeed(42, 7));
     try std.testing.expectEqual(@as(u64, 0x382f_f84c_b272_81e9), deriveSeed(std.math.maxInt(u64), 3));
+    // Wrapping-arithmetic boundary inputs.
+    try std.testing.expectEqual(@as(u64, 0xb4d0_55fc_f2cb_bd7b), deriveSeed(std.math.maxInt(u64), 0));
+    try std.testing.expectEqual(@as(u64, 0x3365_03c6_b835_bec0), deriveSeed(0, std.math.maxInt(u64)));
 }
 
 test "index(0) is InvalidBound, not the full-domain sentinel" {
@@ -190,4 +198,31 @@ test "length stays within the inclusive bound" {
     for (0..1000) |_| {
         try std.testing.expect(src.length(5) <= 5);
     }
+}
+
+test "length(0) is always 0 and index stays in range" {
+    var src = Source.initRandom(std.testing.allocator, deriveSeed(7, 1), 1000);
+    defer src.deinit();
+    for (0..100) |_| {
+        try std.testing.expectEqual(@as(usize, 0), src.length(0));
+        try std.testing.expect(src.index(7) < 7);
+        try std.testing.expectEqual(@as(u64, 0), src.index(1));
+    }
+}
+
+test "recorded sequence stays bounded after the draw limit" {
+    var src = Source.initRandom(std.testing.allocator, deriveSeed(1, 0), 3);
+    defer src.deinit();
+    for (0..100) |_| _ = src.range(10);
+    try std.testing.expect(src.limit_exceeded);
+    try std.testing.expect(src.recorded.items.len <= 4);
+}
+
+test "recording failure surfaces as sticky error, values still flow" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var src = Source.initRandom(failing.allocator(), deriveSeed(1, 0), 100);
+    defer src.deinit();
+    _ = src.range(10);
+    try std.testing.expectEqual(error.OutOfMemory, src.sticky_error.?);
+    try std.testing.expectEqual(@as(usize, 0), src.recorded.items.len);
 }

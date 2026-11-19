@@ -92,6 +92,27 @@ test "replay exhaustion: draws past the end return 0 and set the flag" {
     try std.testing.expect(rep.exhausted);
 }
 
+test "replay of an empty sequence exhausts immediately" {
+    var rep = Source.initReplay(std.testing.allocator, &.{}, 100);
+    defer rep.deinit();
+    try std.testing.expectEqual(@as(u64, 0), rep.range(5));
+    try std.testing.expect(rep.exhausted);
+}
+
+test "replay ignores an unconsumed surplus suffix" {
+    const recorded = [_]Choice{
+        .{ .bound = 5, .value = 3 },
+        .{ .bound = 5, .value = 4 },
+        .{ .bound = 5, .value = 2 },
+    };
+    var rep = Source.initReplay(std.testing.allocator, &recorded, 100);
+    defer rep.deinit();
+    try std.testing.expectEqual(@as(u64, 3), rep.range(5));
+    try std.testing.expect(!rep.exhausted);
+    // Only the consumed prefix is re-recorded; the suffix drops off.
+    try std.testing.expectEqual(@as(usize, 1), rep.recorded.items.len);
+}
+
 test "boolean draws are recorded as range(2)" {
     var src = Source.initRandom(std.testing.allocator, zigprop.deriveSeed(3, 0), 100);
     defer src.deinit();
