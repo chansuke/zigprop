@@ -106,7 +106,8 @@ Which milestone moved which number (per the milestone commits): M2, M4a, M4b and
   2026-11-19, after the repository went public: CI and Formal
   verification both passed (the Benchmarks workflow is on-demand
   and has not run yet). Actions are pinned by full commit SHA.
-- Cross-platform behaviour (macOS, 32-bit `usize` in `length`) is
+- Cross-platform behaviour: macOS runs in CI (a macos-latest job,
+  green at the v0.3.0 release); 32-bit `usize` in `length` is still
   untested.
 - The v2.1 acceptance rule (key sequences, P4 re-expression) has no
   Lean/TLA+ counterpart yet: the formal artifacts model the v2

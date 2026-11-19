@@ -64,7 +64,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zigprop", .module = mod_fast }},
         }),
     });
-    const validation_step = b.step("validation", "Run the §9 validation targets (T1 varint, T2 RLE, T3 float codec, T4 recursive union)");
+    const validation_step = b.step("validation", "Run the pre-registered validation targets T1-T9e");
     validation_step.dependOn(&b.addRunArtifact(validation_exe).step);
 
     const bench_step = b.step("bench", "Run benchmarks");

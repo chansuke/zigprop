@@ -3,8 +3,7 @@
 Property-based testing for Zig, built on integrated shrinking over
 recorded choice sequences.
 
-**Status: v0.3 is implemented on `main` and awaiting its release
-step. The latest release is v0.2.1.** v0.3 settles the public API: the breaking
+**Status: the latest release is v0.3.0.** v0.3 settles the public API: the breaking
 changes below land in one go, and no further breaks are planned.
 Every pre-registered validation target is met on all 10 registered
 seeds. That covers Phase 0's T1/T2

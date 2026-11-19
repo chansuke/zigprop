@@ -34,7 +34,7 @@ jobs:
             echo "std.debug.print outside the *OrError wrappers" >&2
             exit 1
           fi
-      - name: Validation targets (T1-T4)
+      - name: Validation targets (T1-T9e)
         run: zig build validation
       - name: Benchmark harness (smoke)
         run: zig build bench -Dsmoke
