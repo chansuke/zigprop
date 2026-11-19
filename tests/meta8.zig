@@ -98,11 +98,11 @@ fn expectAllNestedCut(v: Json, seen: *[4]bool) !void {
         .int, .str => {},
         .list => |xs| for (xs) |x| {
             try std.testing.expect(isCutForm(x));
-            seen[@intFromEnum(x)] = true;
+            seen[@backingInt(x)] = true;
         },
         .obj => |ps| for (ps) |p| {
             try std.testing.expect(isCutForm(p.v));
-            seen[@intFromEnum(p.v)] = true;
+            seen[@backingInt(p.v)] = true;
         },
     }
 }
@@ -139,7 +139,7 @@ test "multi-path: JSON at max_depth = 0 cuts every nested value" {
     }
     try std.testing.expect(saw_nested);
     // The nested cut forms are no longer all .int.
-    try std.testing.expect(seen[@intFromEnum(Json.str)] or seen[@intFromEnum(Json.list)] or seen[@intFromEnum(Json.obj)]);
+    try std.testing.expect(seen[@backingInt(Json.str)] or seen[@backingInt(Json.list)] or seen[@backingInt(Json.obj)]);
 
     // Pinned by replay: root .obj with one pair; the pair's key is
     // generated normally (length 1, one u8 pair); its value is cut,
