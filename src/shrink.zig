@@ -21,6 +21,7 @@ const Choice = source.Choice;
 const GenContext = source.GenContext;
 const Limits = source.Limits;
 const Source = source.Source;
+const Span = source.Span;
 
 pub const ShrinkOutcome = enum {
     fixed_point,
@@ -37,6 +38,9 @@ pub const AttemptResult = union(enum) {
         keys: []u64,
         /// Key-comparison skip flags, result-owned.
         skips: []bool,
+        /// Span annotations of the consumed sequence, result-owned
+        /// (design v0.3 §3.2, D18). Metadata only.
+        spans: []Span,
         /// Display snapshot of the failing value, result-owned.
         value_display: []u8,
     },
@@ -80,8 +84,10 @@ pub fn evaluateAttempt(
     errdefer result_allocator.free(keys);
     const skips = try result_allocator.dupe(bool, src.recorded_skip.items);
     errdefer result_allocator.free(skips);
+    const spans = try result_allocator.dupe(Span, src.recorded_spans.items);
+    errdefer result_allocator.free(spans);
     const display = try std.fmt.allocPrint(result_allocator, "{any}", .{value});
-    return .{ .fail = .{ .choices = choices, .keys = keys, .skips = skips, .value_display = display } };
+    return .{ .fail = .{ .choices = choices, .keys = keys, .skips = skips, .spans = spans, .value_display = display } };
 }
 
 pub const ShrinkResult = struct {
@@ -143,6 +149,25 @@ pub fn shrink(
     initial_skips: []const bool,
     initial_display: []const u8,
 ) !ShrinkResult {
+    return shrinkSpanned(result_allocator, T, generator, property, limits, budget, initial, initial_keys, initial_skips, &.{}, initial_display);
+}
+
+/// `shrink` with the initial sequence's span annotations (design
+/// v0.3 §3.2). The runner uses this form; spans are metadata and
+/// never affect acceptance.
+pub fn shrinkSpanned(
+    result_allocator: Allocator,
+    comptime T: type,
+    generator: ?*const fn (*GenContext) anyerror!T,
+    property: *const fn (T) bool,
+    limits: Limits,
+    budget: usize,
+    initial: []const Choice,
+    initial_keys: []const u64,
+    initial_skips: []const bool,
+    initial_spans: []const Span,
+    initial_display: []const u8,
+) !ShrinkResult {
     const Inner = struct {
         allocator: Allocator,
         generator: ?*const fn (*GenContext) anyerror!T,
@@ -158,6 +183,9 @@ pub fn shrink(
         best: []Choice,
         best_keys: []u64,
         best_skips: []bool,
+        /// Spans of the best sequence (design v0.3 §3.2); replaced
+        /// together with it on every acceptance.
+        best_spans: []Span,
         best_display: []u8,
 
         const Fail = @FieldType(AttemptResult, "fail");
@@ -186,6 +214,7 @@ pub fn shrink(
             self.allocator.free(f.choices);
             self.allocator.free(f.keys);
             self.allocator.free(f.skips);
+            self.allocator.free(f.spans);
             self.allocator.free(f.value_display);
         }
 
@@ -193,10 +222,12 @@ pub fn shrink(
             self.allocator.free(self.best);
             self.allocator.free(self.best_keys);
             self.allocator.free(self.best_skips);
+            self.allocator.free(self.best_spans);
             self.allocator.free(self.best_display);
             self.best = f.choices;
             self.best_keys = f.keys;
             self.best_skips = f.skips;
+            self.best_spans = f.spans;
             self.best_display = f.value_display;
         }
 
@@ -367,6 +398,13 @@ pub fn shrink(
         result_allocator.free(best_skips_copy);
         return err;
     };
+    const best_spans_copy = result_allocator.dupe(Span, initial_spans) catch |err| {
+        result_allocator.free(best_copy);
+        result_allocator.free(best_keys_copy);
+        result_allocator.free(best_skips_copy);
+        result_allocator.free(best_display_copy);
+        return err;
+    };
     var inner = Inner{
         .allocator = result_allocator,
         .generator = generator,
@@ -376,6 +414,7 @@ pub fn shrink(
         .best = best_copy,
         .best_keys = best_keys_copy,
         .best_skips = best_skips_copy,
+        .best_spans = best_spans_copy,
         .best_display = best_display_copy,
     };
     const outcome: ShrinkOutcome = blk: {
@@ -384,6 +423,7 @@ pub fn shrink(
                 result_allocator.free(inner.best);
                 result_allocator.free(inner.best_keys);
                 result_allocator.free(inner.best_skips);
+                result_allocator.free(inner.best_spans);
                 result_allocator.free(inner.best_display);
                 return err;
             };
@@ -398,6 +438,7 @@ pub fn shrink(
     // result carries only the choice sequence and the display.
     result_allocator.free(inner.best_keys);
     result_allocator.free(inner.best_skips);
+    result_allocator.free(inner.best_spans);
     return .{
         .choices = inner.best,
         .value_display = inner.best_display,

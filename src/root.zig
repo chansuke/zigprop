@@ -10,6 +10,7 @@ pub const Choice = source.Choice;
 pub const Limits = source.Limits;
 pub const GenContext = source.GenContext;
 pub const Source = source.Source;
+pub const Span = source.Span;
 pub const deriveSeed = source.deriveSeed;
 
 pub const generate = gen_mod.generate;

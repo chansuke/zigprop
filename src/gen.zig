@@ -48,6 +48,20 @@ pub fn generate(comptime T: type, ctx: *GenContext) !T {
     return generateRec(T, ctx, @Tuple(&.{}), 0);
 }
 
+/// The occurrence span annotation for one generation of the
+/// container type T (design v0.3 §3.2): `type_id` is the 64-bit
+/// FNV-1a hash of `@typeName(T)`, computed at comptime.
+pub fn typeId(comptime T: type) u64 {
+    return comptime blk: {
+        @setEvalBranchQuota(100_000);
+        break :blk std.hash.Fnv1a_64.hash(@typeName(T));
+    };
+}
+
+fn occurrenceInfo(comptime T: type) source.Span.Info {
+    return .{ .occurrence = .{ .type_id = typeId(T) } };
+}
+
 // ---------------------------------------------------------------------
 // Canonical comptime unfolding state (design v0.2 §3.2).
 //
@@ -138,7 +152,11 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
         .bool => return ctx.src.boolean(),
         .int => return generateInt(T, ctx),
         .float => return generateFloat(T, ctx),
-        .@"union" => return generateUnion(T, ctx, Set, n),
+        .@"union" => {
+            const sp = ctx.src.beginSpan(occurrenceInfo(T));
+            defer ctx.src.endSpan(sp);
+            return generateUnion(T, ctx, Set, n);
+        },
         .@"enum" => return generateEnum(T, ctx),
         .optional => |opt| {
             if (ctx.src.boolean()) {
@@ -163,6 +181,7 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
                 @compileError("zigprop: sentinel-terminated slices are not supported: " ++
                     @typeName(T) ++ " (use the plain slice type instead)");
             }
+            const length_pos = ctx.src.recorded.items.len;
             const len = ctx.src.length(ctx.limits.max_len);
             const buf = try ctx.allocator.alloc(ptr.child, len);
             // On an element error the partial buffer is released here;
@@ -171,11 +190,16 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
             errdefer ctx.allocator.free(buf);
             for (buf) |*elem| {
                 try countElement(ctx);
+                // Element span (design v0.3 §3.2): metadata only.
+                const sp = ctx.src.beginSpan(.{ .element = .{ .length_pos = length_pos } });
                 elem.* = try generateRec(ptr.child, ctx, Set, n);
+                ctx.src.endSpan(sp);
             }
             return buf;
         },
         .@"struct" => |st| {
+            const sp = ctx.src.beginSpan(occurrenceInfo(T));
+            defer ctx.src.endSpan(sp);
             var result: T = undefined;
             inline for (st.field_names, st.field_types, st.field_attrs) |name, F, attrs| {
                 if (attrs.@"comptime") {
@@ -259,6 +283,8 @@ fn generateCut(comptime T: type, ctx: *GenContext) !T {
             return ctx.allocator.alloc(ptr.child, 0);
         },
         .@"struct" => |st| {
+            const sp = ctx.src.beginSpan(occurrenceInfo(T));
+            defer ctx.src.endSpan(sp);
             var result: T = undefined;
             inline for (st.field_names, st.field_types, st.field_attrs) |name, F, attrs| {
                 if (attrs.@"comptime") {
@@ -274,6 +300,8 @@ fn generateCut(comptime T: type, ctx: *GenContext) !T {
             if (un.tag_type == null) {
                 @compileError("zigprop: untagged unions are not generated: " ++ @typeName(T));
             }
+            const sp = ctx.src.beginSpan(occurrenceInfo(T));
+            defer ctx.src.endSpan(sp);
             inline for (un.field_names, un.field_types) |name, Payload| {
                 if (comptime cutExists(Payload)) {
                     if (Payload == void) {

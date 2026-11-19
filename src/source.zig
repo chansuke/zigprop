@@ -15,6 +15,27 @@ pub const Choice = struct {
     value: u64,
 };
 
+/// A structural annotation of the recorded sequence (design v0.3 §3.2,
+/// D18): the positions `[start, end)` of one slice element or of one
+/// container occurrence. Spans are metadata only: they never enter
+/// the key sequence or the acceptance rule, so a wrong or stale span
+/// can only cost shrink efficiency, never soundness (§3.4).
+pub const Span = struct {
+    start: usize,
+    end: usize,
+    info: Info,
+
+    pub const Info = union(enum) {
+        /// One element of a slice; `length_pos` is the recorded
+        /// position of that slice's length draw.
+        element: struct { length_pos: usize },
+        /// One generation of a struct or union; `type_id` is the
+        /// 64-bit hash of `@typeName` (collisions only cost
+        /// efficiency, §3.2).
+        occurrence: struct { type_id: u64 },
+    };
+};
+
 /// Generation limits shared by automatic and custom generators (design §3).
 pub const Limits = struct {
     /// Inclusive upper bound for slice lengths.
@@ -76,6 +97,9 @@ pub const Source = struct {
     /// Recorded positions excluded from the key comparison: the second
     /// choice of an annotated integer pair.
     recorded_skip: std.ArrayList(bool) = .empty,
+    /// Span annotations in pre-order of their start (design v0.3
+    /// §3.2). Metadata only; see `Span`.
+    recorded_spans: std.ArrayList(Span) = .empty,
     /// Replay cursor.
     pos: usize = 0,
     /// Set when a replay ran past the end of the recorded sequence.
@@ -111,6 +135,31 @@ pub const Source = struct {
         self.recorded.deinit(self.allocator);
         self.recorded_keys.deinit(self.allocator);
         self.recorded_skip.deinit(self.allocator);
+        self.recorded_spans.deinit(self.allocator);
+    }
+
+    /// Sentinel returned by `beginSpan` when the span could not be
+    /// stored; `endSpan` ignores it.
+    pub const no_span = std.math.maxInt(usize);
+
+    /// Opens a span at the current recorded position. Returns the
+    /// span's index for `endSpan`. Spans draw nothing and change no
+    /// recorded choice, key or skip (design v0.3 D18). A storage
+    /// failure is kept as the sticky error, like a recording failure.
+    pub fn beginSpan(self: *Source, info: Span.Info) usize {
+        const start = self.recorded.items.len;
+        self.recorded_spans.append(self.allocator, .{ .start = start, .end = start, .info = info }) catch |err| {
+            if (self.sticky_error == null) self.sticky_error = err;
+            return no_span;
+        };
+        return self.recorded_spans.items.len - 1;
+    }
+
+    /// Closes the span opened by `beginSpan` at the current recorded
+    /// position.
+    pub fn endSpan(self: *Source, idx: usize) void {
+        if (idx == no_span) return;
+        self.recorded_spans.items[idx].end = self.recorded.items.len;
     }
 
     fn record(self: *Source, choice: Choice) void {
