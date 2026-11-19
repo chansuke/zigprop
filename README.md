@@ -9,7 +9,7 @@ pre-registered validation criteria
 targets: failures shrink to the exact minimal counterexample
 (2^28 for a varint decoder that stops after 4 bytes; a single run
 of length 256 for an RLE decoder that truncates run lengths to
-u8). v0.2 adds floats (f16/f32/f64) so far; tagged unions and
+u8). v0.2 adds floats (f16/f32/f64) and tagged unions so far;
 recursive types are designed in
 [docs/design-v0.2.md](docs/design-v0.2.md) but not yet
 implemented. [docs/verification.md](docs/verification.md) maps
