@@ -81,13 +81,29 @@ fn alwaysTrue(comptime T: type) fn (T) bool {
 // C1: multi-path recursive types
 // ---------------------------------------------------------------------
 
-/// Every Json below the root must be the cut form: the first variant
-/// with a cut form is .int, so list and obj are never taken.
-fn expectAllNestedCut(v: Json) !void {
+/// Every Json below the root must be a cut form (design v0.3 §1.3):
+/// .int or .str (generated normally, they do not reach Json), or an
+/// empty .list / .obj (the recursive channels are cut). v1 pinned
+/// "always .int" here; that expectation was retired in M7.
+fn isCutForm(x: Json) bool {
+    return switch (x) {
+        .int, .str => true,
+        .list => |xs| xs.len == 0,
+        .obj => |ps| ps.len == 0,
+    };
+}
+
+fn expectAllNestedCut(v: Json, seen: *[4]bool) !void {
     switch (v) {
         .int, .str => {},
-        .list => |xs| for (xs) |x| try std.testing.expect(std.meta.activeTag(x) == .int),
-        .obj => |ps| for (ps) |p| try std.testing.expect(std.meta.activeTag(p.v) == .int),
+        .list => |xs| for (xs) |x| {
+            try std.testing.expect(isCutForm(x));
+            seen[@intFromEnum(x)] = true;
+        },
+        .obj => |ps| for (ps) |p| {
+            try std.testing.expect(isCutForm(p.v));
+            seen[@intFromEnum(p.v)] = true;
+        },
     }
 }
 
@@ -111,9 +127,10 @@ test "multi-path: JSON at max_depth = 0 cuts every nested value" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var saw_nested = false;
+    var seen: [4]bool = @splat(false);
     for (0..10) |seed| {
         const v = try genRandom(Json, &arena, seed, .{ .max_len = 3, .max_depth = 0 });
-        try expectAllNestedCut(v);
+        try expectAllNestedCut(v, &seen);
         switch (v) {
             .list => |xs| saw_nested = saw_nested or xs.len > 0,
             .obj => |ps| saw_nested = saw_nested or ps.len > 0,
@@ -121,18 +138,21 @@ test "multi-path: JSON at max_depth = 0 cuts every nested value" {
         }
     }
     try std.testing.expect(saw_nested);
+    // The nested cut forms are no longer all .int.
+    try std.testing.expect(seen[@intFromEnum(Json.str)] or seen[@intFromEnum(Json.list)] or seen[@intFromEnum(Json.obj)]);
 
     // Pinned by replay: root .obj with one pair; the pair's key is
-    // generated normally (length 1, one u8 pair), its value is the
-    // cut form .int whose integer still draws.
+    // generated normally (length 1, one u8 pair); its value is cut,
+    // drawing the tag (0 = .int) among the four admissible variants,
+    // then the integer. (v1: no tag draw, 7 values consumed.)
     var consumed: usize = 0;
-    const v = try genReplay(Json, &arena, &.{ 3, 1, 1, 0, 120, 0, 5 }, .{ .max_depth = 0 }, &consumed);
+    const v = try genReplay(Json, &arena, &.{ 3, 1, 1, 0, 120, 0, 0, 5 }, .{ .max_depth = 0 }, &consumed);
     try std.testing.expect(std.meta.activeTag(v) == .obj);
     try std.testing.expectEqual(@as(usize, 1), v.obj.len);
     try std.testing.expectEqualStrings("x", v.obj[0].k);
     try std.testing.expect(std.meta.activeTag(v.obj[0].v) == .int);
     try std.testing.expectEqual(@as(i64, -3), v.obj[0].v.int);
-    try std.testing.expectEqual(@as(usize, 7), consumed);
+    try std.testing.expectEqual(@as(usize, 8), consumed);
 }
 
 test "multi-path: an AST-like union generates" {
@@ -171,21 +191,34 @@ test "multi-path: a struct with two slice channels to itself stays depth-bounded
 // I1: void and zero-length-array payloads have cut forms
 // ---------------------------------------------------------------------
 
-test "cut: a void variant is the cut form and consumes no draws" {
+test "cut: a void variant is admissible at the cut, chosen by a tag draw" {
+    // v2 (M7): both List variants are admissible at the cut (.nil is
+    // void, .cons's slice is cut to empty), so m = 2 and the cut
+    // element draws its tag. (v1: always .nil with no draw, 2 values.)
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var consumed: usize = 0;
-    const v = try genReplay(List, &arena, &.{ 1, 1 }, .{ .max_depth = 0, .max_len = 4 }, &consumed);
+    const v = try genReplay(List, &arena, &.{ 1, 1, 0 }, .{ .max_depth = 0, .max_len = 4 }, &consumed);
     try std.testing.expect(std.meta.activeTag(v) == .cons);
     try std.testing.expectEqual(@as(usize, 1), v.cons.len);
     try std.testing.expect(std.meta.activeTag(v.cons[0]) == .nil);
-    // tag draw + length draw; the cut element draws nothing.
-    try std.testing.expectEqual(@as(usize, 2), consumed);
+    // root tag + length draw + the cut element's tag draw.
+    try std.testing.expectEqual(@as(usize, 3), consumed);
+
+    const w = try genReplay(List, &arena, &.{ 1, 1, 1 }, .{ .max_depth = 0, .max_len = 4 }, &consumed);
+    try std.testing.expect(std.meta.activeTag(w.cons[0]) == .cons);
+    try std.testing.expectEqual(@as(usize, 0), w.cons[0].cons.len);
+    try std.testing.expectEqual(@as(usize, 3), consumed);
 }
 
 test "cut: an all-void union field no longer makes the cut fail" {
+    // v2 (M7): Color does not reach Node, so a cut Node generates it
+    // normally; both colors appear at the cut, and the kids channel
+    // is still cut. (v1: always .red with no draw.)
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
+    var seen_red = false;
+    var seen_black = false;
     for (0..10) |seed| {
         var src = zigprop.internal.Source.initRandom(std.testing.allocator, zigprop.internal.deriveSeed(seed, 0), 100_000);
         defer src.deinit();
@@ -193,28 +226,36 @@ test "cut: an all-void union field no longer makes the cut fail" {
         var ctx = zigprop.internal.genContextForTest(&ctx_state, &src, arena.allocator(), .{ .max_depth = 0, .max_len = 4 });
         const n = try zigprop.generate(Node, &ctx);
         for (n.kids) |k| {
-            try std.testing.expect(std.meta.activeTag(k.c) == .red);
+            switch (k.c) {
+                .red => seen_red = true,
+                .black => seen_black = true,
+            }
             try std.testing.expectEqual(@as(usize, 0), k.kids.len);
         }
     }
+    try std.testing.expect(seen_red and seen_black);
 }
 
-test "cut: a zero-length-array variant is a cut form" {
+test "cut: a zero-length-array variant is generated normally at the cut" {
+    // v2 (M7): ZU does not reach ZNode, so the cut kid's f is generated
+    // normally: tag 0 = .e ([0]u8, no further draw) or tag 1 = .v.
+    // (v1: always .e with no draw, 4 values.)
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    // Root f = .v (tag 1, u8 pair 0/5), kids length 1; the kid is
-    // cut: f = .e with no draws, kids empty.
     var consumed: usize = 0;
-    const z = try genReplay(ZNode, &arena, &.{ 1, 0, 5, 1 }, .{ .max_depth = 0, .max_len = 4 }, &consumed);
+    const z = try genReplay(ZNode, &arena, &.{ 1, 0, 5, 1, 0 }, .{ .max_depth = 0, .max_len = 4 }, &consumed);
     try std.testing.expect(std.meta.activeTag(z.f) == .v);
     try std.testing.expectEqual(@as(usize, 1), z.kids.len);
     try std.testing.expect(std.meta.activeTag(z.kids[0].f) == .e);
     try std.testing.expectEqual(@as(usize, 0), z.kids[0].kids.len);
-    try std.testing.expectEqual(@as(usize, 4), consumed);
+    try std.testing.expectEqual(@as(usize, 5), consumed);
 
-    // Same shape with an element type that had no cut form before
-    // the fix ([0]Unit used to fall through to .v and draw).
-    const z2 = try genReplay(ZNode2, &arena, &.{ 1, 0, 5, 1 }, .{ .max_depth = 0, .max_len = 4 }, &consumed);
+    const zv = try genReplay(ZNode, &arena, &.{ 1, 0, 5, 1, 1, 0, 9 }, .{ .max_depth = 0, .max_len = 4 }, &consumed);
+    try std.testing.expectEqual(@as(u8, 9), zv.kids[0].f.v);
+    try std.testing.expectEqual(@as(usize, 7), consumed);
+
+    // Same shape with a [0]Unit payload (the v0.2.1 I1 fix's case).
+    const z2 = try genReplay(ZNode2, &arena, &.{ 1, 0, 5, 1, 0 }, .{ .max_depth = 0, .max_len = 4 }, &consumed);
     try std.testing.expect(std.meta.activeTag(z2.kids[0].f) == .e);
-    try std.testing.expectEqual(@as(usize, 4), consumed);
+    try std.testing.expectEqual(@as(usize, 5), consumed);
 }

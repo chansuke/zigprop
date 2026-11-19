@@ -390,3 +390,199 @@ test "shrink: budget exhaustion stops the new passes early" {
     try std.testing.expectEqual(@as(usize, 1), r.evaluations);
     try std.testing.expectEqual(zigprop.ShrinkOutcome.budget_exhausted, r.outcome);
 }
+
+// ---------------------------------------------------------------------
+// M7: the cut scope (design v0.3 §1.3, §1.7, D12, D13)
+// ---------------------------------------------------------------------
+
+const cut = zigprop.internal.cut;
+
+// The meta7 / meta8 zoo, plus the §1.7 types.
+const MA = struct { tag: u8, bs: []const MB };
+const MB = struct { back: []const MA, leaf: bool };
+const Json = union(enum) { int: i64, str: []const u8, list: []const Json, obj: []const Pair };
+const Pair = struct { k: []const u8, v: Json };
+const E = union(enum) { lit: i64, add: []const E, let: struct { name: []const u8, body: []const E } };
+const Bin = struct { v: i64, a: []const Bin, b: []const Bin };
+const List = union(enum) { nil, cons: []const List };
+const Color = union(enum) { red, black };
+const Node = struct { c: Color, kids: []const Node };
+const ZU = union(enum) { e: [0]u8, v: u8 };
+const ZNode = struct { f: ZU, kids: []const ZNode };
+const Unit = union(enum) { a };
+const ZU2 = union(enum) { e: [0]Unit, v: u8 };
+const ZNode2 = struct { f: ZU2, kids: []const ZNode2 };
+const Tree2 = struct { name: []const u8, extra: ?u32, kids: []const Tree2 };
+const Other = struct { next: []const Other };
+const Tree3 = struct { meta: ?Other, kids: []const Tree3 };
+const Value = union(enum) { int: i64, str: []const u8, list: []const Value };
+const Opt = struct { x: u8, child: ?*const u8 = null }; // not generated; type-level only
+const ArrRec = struct { pair: [2]?ArrRecBox, v: u8 };
+const ArrRecBox = struct { inner: []const ArrRec };
+
+fn zeroReplayCut(comptime R: type) !bool {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const zeros: [64]Choice = @splat(.{ .bound = 0, .value = 0 });
+    var src = zigprop.internal.Source.initReplay(a, &zeros, 100_000);
+    var st: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&st, &src, a, .{});
+    _ = cut.generateCut(R, &ctx) catch |err| {
+        // Widened: a cut form without unions cannot fail this way, so
+        // its inferred error set lacks InvalidGeneration.
+        const e: anyerror = err;
+        if (e == error.InvalidGeneration) return false;
+        return e;
+    };
+    return true;
+}
+
+test "cut: cutExists agrees with generateCut on every listed type" {
+    // Table-driven agreement (design v0.3 §1.7): the all-zero replay of
+    // R's cut form fails with InvalidGeneration exactly when
+    // !cutExistsRel(R, R). (For legal Zig types every route back to R
+    // passes a slice or an optional, so every listed type has a cut
+    // form; M0-a found no constructible m = 0 union.)
+    inline for (.{ Tree, MA, MB, Json, Pair, E, Bin, List, Node, ZNode, ZNode2, Tree2, Other, Tree3, Value, ArrRec, ArrRecBox }) |R| {
+        errdefer std.debug.print("cut agreement differs for {s}\n", .{@typeName(R)});
+        try std.testing.expectEqual(cut.cutExistsRel(R, R), try zeroReplayCut(R));
+    }
+    // The admissible sets of the zoo's unions (one function, D13).
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, cut.admissible(Json, Json));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, cut.admissible(List, List));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, cut.admissible(E, E));
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, cut.admissible(Value, Value));
+    // Reachability (§1.3 edges).
+    try std.testing.expect(cut.reaches(Pair, Json) and cut.reaches(Json, Pair));
+    try std.testing.expect(!cut.reaches(Color, Node));
+    try std.testing.expect(!cut.reaches(ZU, ZNode));
+    try std.testing.expect(!cut.reaches(?Other, Tree3));
+    try std.testing.expect(cut.reaches(MA, MB) and cut.reaches(MB, MA));
+    try std.testing.expect(cut.reaches([2]?ArrRecBox, ArrRec));
+    try std.testing.expect(!cut.reaches([0]Unit, Unit));
+    _ = Opt;
+}
+
+test "cut: non-recursive fields are generated at the cut" {
+    // Tree2 at max_depth 0: the cut kid draws its name (length 2, "BC")
+    // and its extra (present, 7); only kids, which reaches Tree2, is
+    // cut. (v1: name = "" and extra = null with no draws.)
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [_]u64{ 1, 0, 65, 1, 0, 9, 1, 2, 0, 66, 0, 67, 1, 0, 7 };
+    const buf = try a.alloc(Choice, values.len);
+    for (values, buf) |v, *c| c.* = .{ .bound = 0, .value = v };
+    var src = zigprop.internal.Source.initReplay(a, buf, 100_000);
+    var st: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&st, &src, a, .{ .max_depth = 0, .max_len = 4 });
+    const t = try zigprop.generate(Tree2, &ctx);
+    try std.testing.expect(!src.exhausted);
+    try std.testing.expectEqual(@as(usize, 15), src.pos);
+    try std.testing.expectEqualStrings("A", t.name);
+    try std.testing.expectEqual(@as(?u32, 9), t.extra);
+    try std.testing.expectEqual(@as(usize, 1), t.kids.len);
+    try std.testing.expectEqualStrings("BC", t.kids[0].name);
+    try std.testing.expectEqual(@as(?u32, 7), t.kids[0].extra);
+    try std.testing.expectEqual(@as(usize, 0), t.kids[0].kids.len);
+    // The cut kid's name has a length draw (position 7, value 2).
+    try std.testing.expectEqual(Choice{ .bound = 5, .value = 2 }, src.recorded.items[7]);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 65, 65, 1, 9, 9, 1, 2, 66, 66, 67, 67, 1, 7, 7 }, src.recorded_keys.items);
+    try std.testing.expectEqualSlices(bool, &.{ false, false, true, false, false, true, false, false, false, true, false, true, false, false, true }, src.recorded_skip.items);
+}
+
+test "cut: Json at the limit draws among admissible variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Pinned: a cut .str under a root .list ([2, 1] then tag 1, length
+    // 1, one u8 pair).
+    const values = [_]u64{ 2, 1, 1, 1, 0, 88 };
+    const buf = try a.alloc(Choice, values.len);
+    for (values, buf) |v, *c| c.* = .{ .bound = 0, .value = v };
+    var src = zigprop.internal.Source.initReplay(a, buf, 100_000);
+    var st: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&st, &src, a, .{ .max_depth = 0 });
+    const v = try zigprop.generate(Json, &ctx);
+    try std.testing.expectEqual(@as(usize, 6), src.pos);
+    try std.testing.expectEqualStrings("X", v.list[0].str);
+    try std.testing.expectEqual(Choice{ .bound = 4, .value = 1 }, src.recorded.items[2]); // the cut tag draw, m = 4
+
+    // Seeds 0..9: .str and an empty .list both occur at the cut.
+    var saw_str = false;
+    var saw_empty_list = false;
+    for (0..10) |seed| {
+        for (0..20) |attempt| {
+            var rs = zigprop.internal.Source.initRandom(a, zigprop.internal.deriveSeed(seed, attempt), 100_000);
+            var rst: GenState = undefined;
+            var rctx = zigprop.internal.genContextForTest(&rst, &rs, a, .{ .max_depth = 0, .max_len = 4 });
+            const j = zigprop.generate(Json, &rctx) catch continue;
+            const nested: []const Json = switch (j) {
+                .list => |xs| xs,
+                else => &.{},
+            };
+            for (nested) |x| switch (x) {
+                .str => saw_str = true,
+                .list => |l| {
+                    try std.testing.expectEqual(@as(usize, 0), l.len);
+                    saw_empty_list = true;
+                },
+                else => {},
+            };
+        }
+    }
+    try std.testing.expect(saw_str and saw_empty_list);
+}
+
+fn otherDepth(o: Other) usize {
+    var d: usize = 0;
+    for (o.next) |n| d = @max(d, 1 + otherDepth(n));
+    return d;
+}
+
+test "cut: an independent recursive type below the cut stays bounded" {
+    // Tree3 at max_depth 0: the cut kid's meta (?Other) does not reach
+    // Tree3, so it is generated post-limit (Set = ∅, n = cap): Other's
+    // first entry is generated normally and any re-entry of Other is
+    // cut at once, so Other nests at most one level below a cut.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var saw_meta = false;
+    for (0..10) |seed| {
+        for (0..20) |attempt| {
+            var src = zigprop.internal.Source.initRandom(a, zigprop.internal.deriveSeed(seed, attempt), 100_000);
+            var st: GenState = undefined;
+            var ctx = zigprop.internal.genContextForTest(&st, &src, a, .{ .max_depth = 0, .max_len = 3 });
+            const t = zigprop.generate(Tree3, &ctx) catch continue;
+            for (t.kids) |k| {
+                try std.testing.expectEqual(@as(usize, 0), k.kids.len);
+                if (k.meta) |m| {
+                    saw_meta = true;
+                    try std.testing.expect(otherDepth(m) <= 1);
+                }
+            }
+        }
+    }
+    try std.testing.expect(saw_meta);
+}
+
+fn genViaContext(ctx: *GenContext) anyerror!Tree {
+    // A custom generator calling back into built-in generation starts a
+    // fresh comptime state (n = 0) but shares the runtime depth (the
+    // H1 invariant depth >= n of design v0.3 §1.3).
+    return ctx.generate(Tree);
+}
+
+test "cut: custom generators calling generate stay bounded under every max_depth" {
+    for (0..4) |d| {
+        var r = try zigprop.checkCustom(std.testing.allocator, Tree, genViaContext, struct {
+            fn p(_: Tree) bool {
+                return true;
+            }
+        }.p, .{ .max_cases = 30, .limits = .{ .max_len = 3, .max_depth = d } });
+        defer r.deinit();
+        try std.testing.expect(r == .passed);
+    }
+}

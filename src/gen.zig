@@ -10,7 +10,11 @@ const GenContext = source.GenContext;
 
 /// Bumped whenever generation semantics change; regression entries
 /// carry the version they were recorded with (design §7, MF11).
-pub const generator_version: u32 = 1;
+/// It tracks the replay meaning of normalized sequences only (design
+/// v0.3 D16). Version 2 (v0.3 M7): reachability-scoped cuts change what
+/// a recursive type's sequence means; version-1 entries are stale
+/// (`gen_version_mismatch`) and are not replayed (§7.3).
+pub const generator_version: u32 = 2;
 
 /// Counts one array/slice element against the per-case budget
 /// (design §4, MF8). Exceeding the budget fails the generation with
@@ -120,7 +124,8 @@ fn generateRec(comptime T: type, ctx: *GenContext, comptime Set: type, comptime 
                 // validated, the comptime cut at n = cap coincides
                 // with the runtime cut for every legal config.
                 if (comptime n >= max_depth_cap) {
-                    return generateCut(T, ctx);
+                    // The re-entered type is the cut type R.
+                    return cutRel(T, T, ctx);
                 } else {
                     return generateNormal(T, ctx, true, Set, n + 1);
                 }
@@ -141,7 +146,7 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
     // the block closes, before any field is generated.
     if (is_recursive) {
         if (ctx.impl.depth >= ctx.impl.limits.max_depth) {
-            return generateCut(T, ctx);
+            return cutRel(T, T, ctx);
         }
         ctx.impl.depth += 1;
     }
@@ -219,55 +224,111 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
 }
 
 // ---------------------------------------------------------------------
-// Cut forms (design v0.2 §3.3, MF2): the minimal form generated at
-// the depth limit or the comptime cap. Cut mode stops the recursive
-// channels only — slices are empty (no length draw), optionals are
-// null (no draw), a union takes its first variant whose payload
-// has a cut form (no tag draw) — while scalar fields still draw
-// normally. Cut generation descends only through struct fields,
-// array elements and union payloads; a cycle through those
-// channels alone would be an infinitely-sized type, which Zig
-// rejects, so both this function and cutExists terminate.
+// Cut forms (design v0.3 §1.2-§1.3, D12, D13). At a cut point the
+// re-entered type R is generated in cut mode: only the components that
+// reach R are cut; every other component is generated normally in the
+// post-limit state (Set = ∅, n = max_depth_cap), where any further
+// re-entry is cut at comptime. By the §1.3 lemma, "reaches some type
+// of the path's Set" is equivalent to "reaches R", so the decision
+// does not depend on the path.
+//
+// cutRel(C, R), for C reaching R:
+//   slice    -> length 0, no draw
+//   optional -> null, no draw
+//   [N]E     -> each element cut (N > 0; counted against the budget)
+//   struct   -> comptime fields keep their value; a field reaching R is
+//               cut, any other field is generated post-limit
+//   union    -> admissible(U, R) has m variants: m = 0 -> discard
+//               (error.InvalidGeneration), m = 1 -> that variant with no
+//               draw, m >= 2 -> an index(m) tag draw; the payload is cut
+//               if it reaches R, generated post-limit otherwise, and a
+//               void payload draws nothing.
+// The admissible set is ONE function (I1 lesson): cutExistsRel's union
+// branch is "admissible is non-empty" and cutRel's union branch picks
+// from the same array.
+//
+// Termination: cutExistsRel and cutRel recurse only through struct
+// fields, array elements and union payloads that reach R (slices and
+// optionals stop at once); a cycle through those alone would be an
+// infinitely-sized type, which Zig rejects. A post-limit component C
+// does not reach R, so the next cut root Y below it has
+// Reach(Y) ⊆ Reach(C) ⊊ Reach(R): cut nesting is bounded by the number
+// of types (§1.3; an argument, not a mechanical check).
 // ---------------------------------------------------------------------
 
-fn cutExists(comptime T: type) bool {
+const fingerprint = @import("fingerprint.zig");
+
+/// `reaches(A, B)` of design v0.3 §1.3 (shared with the fingerprint's
+/// normalization, §4.2).
+pub fn reaches(comptime A: type, comptime B: type) bool {
+    return fingerprint.reaches(A, B);
+}
+
+/// The admissible variants of U at a cut of R, as indices in
+/// declaration order (design v0.3 §1.3, D13): payloads that do not
+/// reach R, or that reach R and have a cut form.
+pub fn admissible(comptime U: type, comptime R: type) []const usize {
+    return comptime admissibleImpl(U, R);
+}
+
+fn admissibleImpl(comptime U: type, comptime R: type) []const usize {
     @setEvalBranchQuota(100_000);
-    switch (@typeInfo(T)) {
-        // void occurs as a union payload; its cut is the payload
-        // itself and consumes no draws (design v0.2 §3.3).
-        .void, .bool, .int, .float, .@"enum", .optional => return true,
+    var out: []const usize = &.{};
+    for (@typeInfo(U).@"union".field_types, 0..) |P, i| {
+        if (!reaches(P, R) or cutExistsRel(P, R)) out = out ++ &[_]usize{i};
+    }
+    return out;
+}
+
+/// Whether C has a cut form at a cut of R (design v0.3 §1.3).
+pub fn cutExistsRel(comptime C: type, comptime R: type) bool {
+    return comptime cutExistsRelImpl(C, R);
+}
+
+fn cutExistsRelImpl(comptime C: type, comptime R: type) bool {
+    @setEvalBranchQuota(100_000);
+    if (!reaches(C, R)) return true;
+    switch (@typeInfo(C)) {
         .pointer => |ptr| return ptr.size == .slice,
-        // A zero-length array has no elements to cut.
-        .array => |arr| return arr.len == 0 or cutExists(arr.child),
+        .optional => return true,
+        .array => |arr| return arr.len == 0 or cutExistsRel(arr.child, R),
         .@"struct" => |st| {
-            inline for (st.field_types, st.field_attrs) |F, attrs| {
-                if (!attrs.@"comptime" and !cutExists(F)) return false;
+            for (st.field_types, st.field_attrs) |F, attrs| {
+                if (!attrs.@"comptime" and !cutExistsRel(F, R)) return false;
             }
             return true;
         },
-        .@"union" => |un| {
-            inline for (un.field_types) |P| {
-                if (cutExists(P)) return true;
-            }
-            return false;
-        },
-        else => return false,
+        .@"union" => return admissible(C, R).len > 0,
+        // Scalars, enums and void have no edges, so they never reach R.
+        else => return true,
     }
 }
 
-fn generateCut(comptime T: type, ctx: *GenContext) !T {
+/// The post-limit state (design v0.3 §1.3): Set = ∅, n = cap.
+const PostLimitSet = @Tuple(&.{});
+
+/// A component of a cut of R: cut if it reaches R, generated normally
+/// in the post-limit state otherwise.
+fn cutChild(comptime F: type, comptime R: type, ctx: *GenContext) !F {
+    if (comptime reaches(F, R)) return cutRel(F, R, ctx);
+    return generateRec(F, ctx, PostLimitSet, max_depth_cap);
+}
+
+/// The cut form of R itself, as generated at a cut of R (internal; for
+/// the §1.7 agreement test).
+pub fn generateCut(comptime R: type, ctx: *GenContext) !R {
+    return cutRel(R, R, ctx);
+}
+
+fn cutRel(comptime T: type, comptime R: type, ctx: *GenContext) !T {
     switch (@typeInfo(T)) {
-        .bool => return ctx.impl.src.boolean(),
-        .int => return generateInt(T, ctx),
-        .float => return generateFloat(T, ctx),
-        .@"enum" => return generateEnum(T, ctx),
         .optional => return null,
         .array => |arr| {
             if (arr.len == 0) return .{};
             var result: T = undefined;
             for (&result) |*elem| {
                 try countElement(ctx);
-                elem.* = try generateCut(arr.child, ctx);
+                elem.* = try cutChild(arr.child, R, ctx);
             }
             return result;
         },
@@ -291,7 +352,7 @@ fn generateCut(comptime T: type, ctx: *GenContext) !T {
                     @field(result, name) = attrs.defaultValue(F) orelse
                         @compileError("zigprop: comptime field without a value: " ++ name);
                 } else {
-                    @field(result, name) = try generateCut(F, ctx);
+                    @field(result, name) = try cutChild(F, R, ctx);
                 }
             }
             return result;
@@ -302,19 +363,23 @@ fn generateCut(comptime T: type, ctx: *GenContext) !T {
             }
             const sp = ctx.impl.src.beginSpan(occurrenceInfo(T));
             defer ctx.impl.src.endSpan(sp);
-            inline for (un.field_names, un.field_types) |name, Payload| {
-                if (comptime cutExists(Payload)) {
-                    if (Payload == void) {
-                        return @unionInit(T, name, {});
-                    }
-                    return @unionInit(T, name, try generateCut(Payload, ctx));
+            const adm = comptime admissible(T, R);
+            // m = 0: no admissible variant (believed unreachable for
+            // generatable types; M0-a), the attempt is a discard.
+            if (adm.len == 0) return error.InvalidGeneration;
+            // m = 1: no tag draw; m >= 2: one index(m) draw.
+            const k: usize = if (adm.len == 1) 0 else @intCast(ctx.impl.src.index(adm.len));
+            inline for (adm, 0..) |vi, j| {
+                if (k == j) {
+                    const name = un.field_names[vi];
+                    const Payload = un.field_types[vi];
+                    if (Payload == void) return @unionInit(T, name, {});
+                    return @unionInit(T, name, try cutChild(Payload, R, ctx));
                 }
             }
-            return error.InvalidGeneration;
+            unreachable; // k < adm.len by construction
         },
-        else => @compileError("zigprop: unsupported type " ++ @typeName(T) ++
-            " (generates bool, integers of 1-64 bits, f16/f32/f64, enums, tagged unions, " ++
-            "optionals, arrays, slices and structs; use checkCustom for anything else)"),
+        else => @compileError("zigprop: a cut is only formed for components that reach the cut type: " ++ @typeName(T)),
     }
 }
 

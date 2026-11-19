@@ -255,12 +255,30 @@ test "zon: a version-1 file without fingerprints imports" {
     try std.testing.expectEqual(@as(?zigprop.Fingerprint, null), file.entries[1].fingerprint);
     // A mixed file: the third entry carries a fingerprint.
     try std.testing.expectEqual(@as(u64, 0x4d40aac905fa7c87), file.entries[2].fingerprint.?.type_hash);
-    // The v0.2-style entries replay (unverified), the fingerprinted
-    // one matches.
+    // The entries were recorded with generator_version 1: since v0.3 M7
+    // (generator_version 2) they are stale as gen_version_mismatch and
+    // are not replayed (design v0.3 §7.3). Before M7 the same file
+    // replayed as 3 passed, 2 of them unverified.
     var r = try zigprop.checkCustom(std.testing.allocator, u32, singleDraw, alwaysTrue, .{ .regressions = file.entries, .regression_id = "v1", .max_cases = 1 });
     defer r.deinit();
-    try std.testing.expectEqual(@as(usize, 3), r.passed.regressions.passed);
-    try std.testing.expectEqual(@as(usize, 2), r.passed.regressions.unverified);
+    try std.testing.expectEqual(@as(usize, 0), r.passed.regressions.passed);
+    try std.testing.expectEqual(@as(usize, 3), r.passed.regressions.stale.len);
+    for (r.passed.regressions.stale) |s| try std.testing.expectEqual(zigprop.StaleReason.gen_version_mismatch, s.reason);
+}
+
+test "stale: a v1-recorded entry is stale under generator_version 2" {
+    // Design v0.3 §7.3, D34: no best-effort replay, no migration. The
+    // entry would fail if replayed (25 >= 10); it must not be.
+    try std.testing.expectEqual(@as(u32, 2), zigprop.generator_version);
+    const entries = [_]zigprop.Regression{.{ .id = "old", .gen_version = 1, .fingerprint = customFp(), .choices = &.{25} }};
+    var r = try zigprop.checkCustom(std.testing.allocator, u32, singleDraw, smallOnly, .{ .regressions = &entries, .regression_id = "old", .seed = 4 });
+    defer r.deinit();
+    try std.testing.expect(r.failed.origin == .random);
+    try std.testing.expectEqual(@as(usize, 1), r.failed.regressions.stale.len);
+    try std.testing.expectEqual(zigprop.StaleReason.gen_version_mismatch, r.failed.regressions.stale[0].reason);
+    // With fail_on_stale the wrapper reports it as an error once the
+    // property passes.
+    try std.testing.expectError(error.StaleRegression, zigprop.checkCustomOrError(std.testing.allocator, u32, singleDraw, alwaysTrue, .{ .regressions = &entries, .regression_id = "old", .max_cases = 1, .fail_on_stale = true }));
 }
 
 test "zon: tests/regressions.zon imports as a RegressionFile" {

@@ -1,17 +1,21 @@
 //! v0.3 M1: golden pins for the recursive-cut group (design v0.3 §7.4,
-//! D35), recorded from v0.2.1 (generator_version 1).
+//! D35), recorded from v0.2.1 (generator_version 1); rewritten for
+//! generator_version 2 in M7.
 //!
 //! This file is kept apart from tests/meta10.zig on purpose: M7 (cut
 //! scope, generator_version 2) changes what is generated at a cut, so
-//! it rewrites the (R) pins here deliberately (keeping these v1 values
-//! as comments) and re-records the (S) pins. Every other (R) pin must
-//! survive M7 unchanged.
+//! it rewrote the (R) pins here deliberately (the retired v1 values are
+//! kept as comments above the tables) and re-recorded the (S) pins.
+//! Tree's cut form ({value drawn, kids empty}) is the same in v1 and v2,
+//! so its (R) pins are unchanged. Every (R) pin in tests/meta10.zig
+//! survives M7 unchanged.
 //!
 //! (R) replay pins: values -> value, re-recorded choices (bounds
 //! included), keys, skips, consumed count. (S) random pins: seed
 //! (attempt 0) -> recording and value. Display strings are not pinned.
 //!
-//! All expected values are literals captured from a v0.2.1 run.
+//! All expected values are literals captured from a run (v0.2.1 for M1;
+//! the M7 implementation for the rewritten pins).
 
 const std = @import("std");
 const zigprop = @import("zigprop");
@@ -123,16 +127,18 @@ test "golden rec (R): Tree at max_depth 0 and 1" {
 }
 
 test "golden rec (R): Json at max_depth 0" {
-    // v1: every cut Json is .int (first variant with a cut form, no
-    // tag draw); the pair key is generated normally.
+    // v2 (M7): a cut Json draws its tag among the admissible variants
+    // {int, str, list, obj}; .str is generated normally, .list and
+    // .obj are empty. (v1: every cut Json was .int with no tag draw.)
     try checkReplay(Json, &replay_json_depth0);
 }
 
 test "golden rec (R): List, Node, ZNode and Tree2 cuts" {
-    // v1: List's cut is .nil with no tag draw; Node's cut Color is
-    // .red with no draw; ZNode's cut ZU is .e ([0]u8, no draw);
-    // Tree2's cut kid has name = "" and extra = null (non-recursive
-    // channels are cut too).
+    // v2 (M7): List's cut draws a tag (m = 2); Node's Color and
+    // ZNode's ZU do not reach the cut type and are generated normally;
+    // Tree2's cut kid generates name and extra normally and cuts only
+    // kids. (v1: .nil / .red / .e with no draws; name = "", extra =
+    // null.)
     try checkReplay(List, &replay_list);
     try checkReplay(Node, &replay_node);
     try checkReplay(ZNode, &replay_znode);
@@ -157,25 +163,58 @@ const replay_tree_depth1 = [_]ReplayPin(Tree){
     .{ .values = &.{ 0, 1, 1, 0, 2, 1, 0, 4 }, .limits = .{ .max_len = 4, .max_depth = 1 }, .value = .{ .value = -1, .kids = &.{.{ .value = 1, .kids = &.{.{ .value = 2, .kids = &.{} }} }} }, .choices = &.{ .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 1 }, .{ .bound = 5, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 2 }, .{ .bound = 5, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 4 } }, .keys = &.{ 1, 1, 1, 2, 2, 1, 4, 4 }, .skips = &.{ false, true, false, false, true, false, false, true }, .consumed = 8 },
 };
 
+// The v1 (generator_version 1) pins below were retired in M7 and are
+// kept here as history (design v0.3 §7.4, D34). Under v1 a cut union
+// took its first variant with a cut form without a tag draw, and every
+// channel of a cut node was cut, recursive or not. Under v2 only the
+// channels that reach the cut type are cut; a cut union draws among its
+// admissible variants (index(m) for m >= 2), and non-recursive channels
+// are generated normally. Each v1 input below is exhausted under v2, so
+// the v2 pins use new inputs that extend them with the new draws.
+//
+// v1 replay_json_depth0:
+//   .{ .values = &.{ 3, 1, 1, 0, 120, 0, 5 }, .limits = .{ .max_depth = 0 }, .value = .{ .obj = &.{.{ .k = &.{120}, .v = .{ .int = -3 } }} }, .choices = &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 33, .value = 1 }, .{ .bound = 33, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 120 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 5 } }, .keys = &.{ 3, 1, 1, 120, 120, 5, 5 }, .skips = &.{ false, false, false, false, true, false, true }, .consumed = 7 },
+//   .{ .values = &.{ 2, 2, 0, 7, 0, 9 }, .limits = .{ .max_depth = 0 }, .value = .{ .list = &.{ .{ .int = -4 }, .{ .int = -5 } } }, .choices = &.{ .{ .bound = 4, .value = 2 }, .{ .bound = 33, .value = 2 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 7 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 9 } }, .keys = &.{ 2, 2, 7, 7, 9, 9 }, .skips = &.{ false, false, false, true, false, true }, .consumed = 6 },
+// v1 replay_list:
+//   .{ .values = &.{ 1, 2 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .cons = &.{ .{ .nil = {} }, .{ .nil = {} } } }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 5, .value = 2 } }, .keys = &.{ 1, 2 }, .skips = &.{ false, false }, .consumed = 2 },
+// v1 replay_node:
+//   .{ .values = &.{ 1, 2 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .c = .{ .black = {} }, .kids = &.{ .{ .c = .{ .red = {} }, .kids = &.{} }, .{ .c = .{ .red = {} }, .kids = &.{} } } }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 5, .value = 2 } }, .keys = &.{ 1, 2 }, .skips = &.{ false, false }, .consumed = 2 },
+// v1 replay_znode:
+//   .{ .values = &.{ 1, 0, 5, 1 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .f = .{ .v = 5 }, .kids = &.{.{ .f = .{ .e = .{} }, .kids = &.{} }} }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 5 }, .{ .bound = 5, .value = 1 } }, .keys = &.{ 1, 5, 5, 1 }, .skips = &.{ false, false, true, false }, .consumed = 4 },
+// v1 replay_tree2:
+//   .{ .values = &.{ 1, 0, 65, 1, 0, 9, 1 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .name = &.{65}, .extra = 9, .kids = &.{.{ .name = &.{}, .extra = null, .kids = &.{} }} }, .choices = &.{ .{ .bound = 5, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 65 }, .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 9 }, .{ .bound = 5, .value = 1 } }, .keys = &.{ 1, 65, 65, 1, 9, 9, 1 }, .skips = &.{ false, false, true, false, false, true, false }, .consumed = 7 },
+
 const replay_json_depth0 = [_]ReplayPin(Json){
-    .{ .values = &.{ 3, 1, 1, 0, 120, 0, 5 }, .limits = .{ .max_depth = 0 }, .value = .{ .obj = &.{.{ .k = &.{120}, .v = .{ .int = -3 } }} }, .choices = &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 33, .value = 1 }, .{ .bound = 33, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 120 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 5 } }, .keys = &.{ 3, 1, 1, 120, 120, 5, 5 }, .skips = &.{ false, false, false, false, true, false, true }, .consumed = 7 },
-    .{ .values = &.{ 2, 2, 0, 7, 0, 9 }, .limits = .{ .max_depth = 0 }, .value = .{ .list = &.{ .{ .int = -4 }, .{ .int = -5 } } }, .choices = &.{ .{ .bound = 4, .value = 2 }, .{ .bound = 33, .value = 2 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 7 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 9 } }, .keys = &.{ 2, 2, 7, 7, 9, 9 }, .skips = &.{ false, false, false, true, false, true }, .consumed = 6 },
+    // The cut pair value draws a tag among {int, str, list, obj}: .int
+    .{ .values = &.{ 3, 1, 1, 0, 120, 0, 0, 5 }, .limits = .{ .max_depth = 0 }, .value = .{ .obj = &.{.{ .k = &.{120}, .v = .{ .int = -3 } }} }, .choices = &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 33, .value = 1 }, .{ .bound = 33, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 120 }, .{ .bound = 4, .value = 0 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 5 } }, .keys = &.{ 3, 1, 1, 120, 120, 0, 5, 5 }, .skips = &.{ false, false, false, false, true, false, false, true }, .consumed = 8 },
+    // ... and .str, generated normally (str does not reach Json)
+    .{ .values = &.{ 3, 1, 1, 0, 120, 1, 2, 0, 65, 0, 66 }, .limits = .{ .max_depth = 0 }, .value = .{ .obj = &.{.{ .k = &.{120}, .v = .{ .str = &.{ 65, 66 } } }} }, .choices = &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 33, .value = 1 }, .{ .bound = 33, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 120 }, .{ .bound = 4, .value = 1 }, .{ .bound = 33, .value = 2 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 65 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 66 } }, .keys = &.{ 3, 1, 1, 120, 120, 1, 2, 65, 65, 66, 66 }, .skips = &.{ false, false, false, false, true, false, false, false, true, false, true }, .consumed = 11 },
+    // Cut list elements: .int and .obj (cut: empty, no length draw)
+    .{ .values = &.{ 2, 2, 0, 0, 7, 3 }, .limits = .{ .max_depth = 0 }, .value = .{ .list = &.{ .{ .int = -4 }, .{ .obj = &.{} } } }, .choices = &.{ .{ .bound = 4, .value = 2 }, .{ .bound = 33, .value = 2 }, .{ .bound = 4, .value = 0 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 7 }, .{ .bound = 4, .value = 3 } }, .keys = &.{ 2, 2, 0, 7, 7, 3 }, .skips = &.{ false, false, false, false, true, false }, .consumed = 6 },
+    // A cut .list is empty with no length draw
+    .{ .values = &.{ 2, 1, 2 }, .limits = .{ .max_depth = 0 }, .value = .{ .list = &.{.{ .list = &.{} }} }, .choices = &.{ .{ .bound = 4, .value = 2 }, .{ .bound = 33, .value = 1 }, .{ .bound = 4, .value = 2 } }, .keys = &.{ 2, 1, 2 }, .skips = &.{ false, false, false }, .consumed = 3 },
 };
 
 const replay_list = [_]ReplayPin(List){
-    .{ .values = &.{ 1, 2 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .cons = &.{ .{ .nil = {} }, .{ .nil = {} } } }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 5, .value = 2 } }, .keys = &.{ 1, 2 }, .skips = &.{ false, false }, .consumed = 2 },
+    // m = 2 at the cut: one tag draw per cut element (nil, cons = &.{})
+    .{ .values = &.{ 1, 2, 0, 1 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .cons = &.{ .{ .nil = {} }, .{ .cons = &.{} } } }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 5, .value = 2 }, .{ .bound = 2, .value = 0 }, .{ .bound = 2, .value = 1 } }, .keys = &.{ 1, 2, 0, 1 }, .skips = &.{ false, false, false, false }, .consumed = 4 },
 };
 
 const replay_node = [_]ReplayPin(Node){
-    .{ .values = &.{ 1, 2 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .c = .{ .black = {} }, .kids = &.{ .{ .c = .{ .red = {} }, .kids = &.{} }, .{ .c = .{ .red = {} }, .kids = &.{} } } }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 5, .value = 2 } }, .keys = &.{ 1, 2 }, .skips = &.{ false, false }, .consumed = 2 },
+    // Color does not reach Node: generated normally at the cut
+    .{ .values = &.{ 1, 2, 0, 1 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .c = .{ .black = {} }, .kids = &.{ .{ .c = .{ .red = {} }, .kids = &.{} }, .{ .c = .{ .black = {} }, .kids = &.{} } } }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 5, .value = 2 }, .{ .bound = 2, .value = 0 }, .{ .bound = 2, .value = 1 } }, .keys = &.{ 1, 2, 0, 1 }, .skips = &.{ false, false, false, false }, .consumed = 4 },
 };
 
 const replay_znode = [_]ReplayPin(ZNode){
-    .{ .values = &.{ 1, 0, 5, 1 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .f = .{ .v = 5 }, .kids = &.{.{ .f = .{ .e = .{} }, .kids = &.{} }} }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 5 }, .{ .bound = 5, .value = 1 } }, .keys = &.{ 1, 5, 5, 1 }, .skips = &.{ false, false, true, false }, .consumed = 4 },
+    // ZU does not reach ZNode: generated normally at the cut (.v, .e)
+    .{ .values = &.{ 1, 0, 5, 1, 1, 0, 9 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .f = .{ .v = 5 }, .kids = &.{.{ .f = .{ .v = 9 }, .kids = &.{} }} }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 5 }, .{ .bound = 5, .value = 1 }, .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 9 } }, .keys = &.{ 1, 5, 5, 1, 1, 9, 9 }, .skips = &.{ false, false, true, false, false, false, true }, .consumed = 7 },
+    .{ .values = &.{ 1, 0, 5, 1, 0 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .f = .{ .v = 5 }, .kids = &.{.{ .f = .{ .e = .{} }, .kids = &.{} }} }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 5 }, .{ .bound = 5, .value = 1 }, .{ .bound = 2, .value = 0 } }, .keys = &.{ 1, 5, 5, 1, 0 }, .skips = &.{ false, false, true, false, false }, .consumed = 5 },
 };
 
 const replay_tree2 = [_]ReplayPin(Tree2){
-    .{ .values = &.{ 1, 0, 65, 1, 0, 9, 1 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .name = &.{65}, .extra = 9, .kids = &.{.{ .name = &.{}, .extra = null, .kids = &.{} }} }, .choices = &.{ .{ .bound = 5, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 65 }, .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 9 }, .{ .bound = 5, .value = 1 } }, .keys = &.{ 1, 65, 65, 1, 9, 9, 1 }, .skips = &.{ false, false, true, false, false, true, false }, .consumed = 7 },
+    // The cut kid's name and extra are generated normally ("BC", 7);
+    // only kids (which reaches Tree2) is cut
+    .{ .values = &.{ 1, 0, 65, 1, 0, 9, 1, 2, 0, 66, 0, 67, 1, 0, 7 }, .limits = .{ .max_len = 4, .max_depth = 0 }, .value = .{ .name = &.{65}, .extra = 9, .kids = &.{.{ .name = &.{ 66, 67 }, .extra = 7, .kids = &.{} }} }, .choices = &.{ .{ .bound = 5, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 65 }, .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 9 }, .{ .bound = 5, .value = 1 }, .{ .bound = 5, .value = 2 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 66 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 67 }, .{ .bound = 2, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 7 } }, .keys = &.{ 1, 65, 65, 1, 9, 9, 1, 2, 66, 66, 67, 67, 1, 7, 7 }, .skips = &.{ false, false, true, false, false, true, false, false, false, true, false, true, false, false, true }, .consumed = 15 },
 };
 
 const random_tree = [_]RandomPin(Tree){
@@ -185,9 +224,9 @@ const random_tree = [_]RandomPin(Tree){
 
 const random_json = [_]RandomPin(Json){
     .{ .seed = 13, .limits = .{ .max_len = 2, .max_depth = 1 }, .value = .{ .int = 9223372036854775806 }, .choices = &.{ .{ .bound = 4, .value = 0 }, .{ .bound = 4, .value = 1 }, .{ .bound = 7, .value = 3 } }, .keys = &.{ 0, 18446744073709551612, 3 }, .skips = &.{ false, false, true } },
-    .{ .seed = 23, .limits = .{ .max_len = 2, .max_depth = 1 }, .value = .{ .obj = &.{ .{ .k = &.{}, .v = .{ .obj = &.{.{ .k = &.{}, .v = .{ .int = 121 } }} } }, .{ .k = &.{ 216, 1 }, .v = .{ .obj = &.{.{ .k = &.{}, .v = .{ .int = -2025531 } }} } } } }, .choices = &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 2 }, .{ .bound = 3, .value = 0 }, .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 242 }, .{ .bound = 3, .value = 2 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 216 }, .{ .bound = 4, .value = 2 }, .{ .bound = 256, .value = 1 }, .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 1 }, .{ .bound = 4, .value = 2 }, .{ .bound = 0, .value = 4051061 } }, .keys = &.{ 3, 2, 0, 3, 1, 242, 242, 2, 216, 216, 1, 1, 3, 1, 4051061, 4051061 }, .skips = &.{ false, false, false, false, false, false, true, false, false, true, false, true, false, false, false, true } },
+    .{ .seed = 23, .limits = .{ .max_len = 2, .max_depth = 1 }, .value = .{ .obj = &.{ .{ .k = &.{}, .v = .{ .obj = &.{.{ .k = &.{}, .v = .{ .obj = &.{} } }} } }, .{ .k = &.{ 216, 1 }, .v = .{ .obj = &.{.{ .k = &.{255}, .v = .{ .list = &.{} } }} } } } }, .choices = &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 2 }, .{ .bound = 3, .value = 0 }, .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 1 }, .{ .bound = 3, .value = 0 }, .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 2 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 216 }, .{ .bound = 4, .value = 2 }, .{ .bound = 256, .value = 1 }, .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 1 }, .{ .bound = 3, .value = 1 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 3 }, .{ .bound = 4, .value = 2 } }, .keys = &.{ 3, 2, 0, 3, 1, 0, 3, 2, 216, 216, 1, 1, 3, 1, 1, 255, 3, 2 }, .skips = &.{ false, false, false, false, false, false, false, false, false, true, false, true, false, false, false, false, true, false } },
     .{ .seed = 33, .limits = .{ .max_len = 2, .max_depth = 0 }, .value = .{ .int = -99 }, .choices = &.{ .{ .bound = 4, .value = 0 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 197 } }, .keys = &.{ 0, 197, 197 }, .skips = &.{ false, false, true } },
-    .{ .seed = 43, .limits = .{ .max_len = 2, .max_depth = 0 }, .value = .{ .obj = &.{ .{ .k = &.{ 0, 1 }, .v = .{ .int = 9223372036854775807 } }, .{ .k = &.{254}, .v = .{ .int = -1 } } } }, .choices = &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 2 }, .{ .bound = 3, .value = 2 }, .{ .bound = 4, .value = 2 }, .{ .bound = 256, .value = 0 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 1 }, .{ .bound = 7, .value = 5 }, .{ .bound = 3, .value = 1 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 2 }, .{ .bound = 4, .value = 2 }, .{ .bound = 0, .value = 1 } }, .keys = &.{ 3, 2, 2, 0, 0, 1, 1, 18446744073709551614, 5, 1, 254, 2, 1, 1 }, .skips = &.{ false, false, false, false, true, false, true, false, true, false, false, true, false, true } },
+    .{ .seed = 43, .limits = .{ .max_len = 2, .max_depth = 0 }, .value = .{ .obj = &.{ .{ .k = &.{ 0, 1 }, .v = .{ .str = &.{ 1, 32 } } }, .{ .k = &.{ 1, 91 }, .v = .{ .str = &.{2} } } } }, .choices = &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 3, .value = 2 }, .{ .bound = 3, .value = 2 }, .{ .bound = 4, .value = 2 }, .{ .bound = 256, .value = 0 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 1 }, .{ .bound = 3, .value = 2 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 2 }, .{ .bound = 256, .value = 32 }, .{ .bound = 3, .value = 2 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 91 }, .{ .bound = 4, .value = 1 }, .{ .bound = 3, .value = 1 }, .{ .bound = 4, .value = 2 }, .{ .bound = 256, .value = 2 } }, .keys = &.{ 3, 2, 2, 0, 0, 1, 1, 1, 2, 1, 1, 32, 32, 2, 1, 1, 91, 91, 1, 1, 2, 2 }, .skips = &.{ false, false, false, false, true, false, true, false, false, false, true, false, true, false, false, true, false, true, false, false, false, true } },
 };
 
 const random_list = [_]RandomPin(List){

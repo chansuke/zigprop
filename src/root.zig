@@ -66,6 +66,13 @@ pub const internal = struct {
     /// The structural hash, its serialization and the reachability
     /// predicates behind the fingerprint (design v0.3 §4.2-§4.3).
     pub const fingerprint = @import("fingerprint.zig");
+    /// The cut-scope machinery (design v0.3 §1.3, D12, D13).
+    pub const cut = struct {
+        pub const reaches = gen_mod.reaches;
+        pub const admissible = gen_mod.admissible;
+        pub const cutExistsRel = gen_mod.cutExistsRel;
+        pub const generateCut = gen_mod.generateCut;
+    };
 };
 
 test {

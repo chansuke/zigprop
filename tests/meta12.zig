@@ -227,7 +227,7 @@ test "workflow: the printed entry round-trips" {
     const entry = try r.failed.regressionEntry(std.testing.allocator, "m12");
     defer std.testing.allocator.free(entry);
     // 2. The printed form is pinned...
-    try std.testing.expectEqualStrings(".{ .id = \"m12\", .gen_version = 1, .fingerprint = .{ .type_hash = 0x4d40aac905fa7c87, .max_len = 32, .max_depth = 8, .custom_generator = true }, .choices = .{10} },", entry);
+    try std.testing.expectEqualStrings(".{ .id = \"m12\", .gen_version = 2, .fingerprint = .{ .type_hash = 0x4d40aac905fa7c87, .max_len = 32, .max_depth = 8, .custom_generator = true }, .choices = .{10} },", entry);
     // ...and is exactly what tests/meta12_entry.zon has in .entries.
     const file_text = @embedFile("meta12_entry.zon");
     try std.testing.expect(std.mem.indexOf(u8, file_text, entry) != null);
@@ -255,7 +255,7 @@ test "workflow: an empty choice list prints a pasteable entry" {
     defer r.deinit();
     const entry = try r.failed.regressionEntry(std.testing.allocator, "a \"quoted\" id");
     defer std.testing.allocator.free(entry);
-    try std.testing.expectEqualStrings(".{ .id = \"a \\\"quoted\\\" id\", .gen_version = 1, .fingerprint = .{ .type_hash = 0x4d40aac905fa7c87, .max_len = 32, .max_depth = 8, .custom_generator = true }, .choices = .{} },", entry);
+    try std.testing.expectEqualStrings(".{ .id = \"a \\\"quoted\\\" id\", .gen_version = 2, .fingerprint = .{ .type_hash = 0x4d40aac905fa7c87, .max_len = 32, .max_depth = 8, .custom_generator = true }, .choices = .{} },", entry);
 }
 
 test "workflow: a multi-choice entry is printed in zig fmt's tuple form" {

@@ -271,7 +271,8 @@ test "regressions: a failing entry fails the run before random cases" {
 test "regressions: passing entries are counted, stale versions skipped" {
     const entries = [_]zigprop.Regression{
         .{ .id = "t", .gen_version = zigprop.generator_version, .choices = &.{5} },
-        .{ .id = "t", .gen_version = 999, .choices = &.{25} },
+        // Recorded by generator_version 1: stale since v0.3 M7 (§7.3).
+        .{ .id = "t", .gen_version = 1, .choices = &.{25} },
         .{ .id = "other", .gen_version = zigprop.generator_version, .choices = &.{25} },
     };
     var report = try zigprop.checkCustom(std.testing.allocator, u32, singleDraw, alwaysTrue, .{
