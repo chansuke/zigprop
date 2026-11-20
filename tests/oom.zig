@@ -1,14 +1,21 @@
 //! Allocation failure at every point (verification pipeline plan §2-4
 //! (d)). Each case runs once without failures (the baseline), then once
-//! per allocation index with `std.testing.FailingAllocator` failing that
-//! allocation. Every run must either return `error.OutOfMemory` or give
-//! the baseline's result: the same Report variant and, for a failure,
-//! the same shrunk choices. Any other result means an allocation failure
-//! was swallowed and turned into a different outcome (a discard,
-//! `passed`, `gave_up`, a different counterexample). `std.testing.allocator`
-//! reports leaks at the end of each test.
+//! per allocation index twice: with `std.testing.FailingAllocator` failing
+//! that allocation and every later one, and with `OneFailure` failing it
+//! alone. Every run must either return `error.OutOfMemory` or give the
+//! baseline's result (`Outcome.eql`: variant, origin, choices, shrunk
+//! choices, `Failure` by `Failure.eql`, evaluations, shrink outcome). Any
+//! other result means an allocation failure was swallowed and turned into
+//! a different outcome (a discard, `passed`, `gave_up`, a different
+//! counterexample or error). `std.testing.allocator` reports leaks at the
+//! end of each test.
 //!
-//! `zig build test` runs two cases (`oom_options.full = false`);
+//! Injection surface: only `alloc` calls fail. `OneFailure` passes
+//! `resize` and `remap` through to its child, and FailingAllocator's
+//! `resize_fail_index` stays at its default `maxInt(usize)`, so a code
+//! path taken only when a resize or remap fails is not exercised.
+//!
+//! `zig build test` runs three cases (`oom_options.full = false`);
 //! `zig build oom-full` runs every case below.
 
 const std = @import("std");
@@ -29,7 +36,7 @@ const Outcome = struct {
     from_regression: bool = false,
     original: []u64 = &.{},
     shrunk: []u64 = &.{},
-    failure_is_false: bool = false,
+    failure: ?zigprop.Failure = null,
     evaluations: usize = 0,
     outcome: ?zigprop.ShrinkOutcome = null,
 
@@ -53,7 +60,7 @@ const Outcome = struct {
                     .from_regression = f.origin == .regression,
                     .original = original,
                     .shrunk = try values(f.shrunk_choices),
-                    .failure_is_false = f.failure == .returned_false,
+                    .failure = f.failure,
                     .evaluations = f.shrink_evaluations,
                     .outcome = f.shrink_outcome,
                 };
@@ -70,7 +77,12 @@ const Outcome = struct {
     fn eql(a: Outcome, b: Outcome) bool {
         return a.tag == b.tag and a.origin == b.origin and a.from_regression == b.from_regression and
             std.mem.eql(u64, a.original, b.original) and std.mem.eql(u64, a.shrunk, b.shrunk) and
-            a.failure_is_false == b.failure_is_false and a.evaluations == b.evaluations and a.outcome == b.outcome;
+            sameFailure(a.failure, b.failure) and a.evaluations == b.evaluations and a.outcome == b.outcome;
+    }
+
+    fn sameFailure(a: ?zigprop.Failure, b: ?zigprop.Failure) bool {
+        if (a == null or b == null) return a == null and b == null;
+        return a.?.eql(b.?);
     }
 };
 
@@ -199,6 +211,14 @@ fn shortSliceWith(ctx: *const Ctx, _: *zigprop.Case, xs: []const u8) anyerror!bo
     return xs.len < ctx.limit;
 }
 
+/// Fails with an error whose name depends on the first byte, so a
+/// changed path can surface as a different error, not only as different
+/// choices.
+fn shortSliceOrErrorWith(ctx: *const Ctx, _: *zigprop.Case, xs: []const u8) anyerror!bool {
+    if (xs.len < ctx.limit) return true;
+    return if (xs[0] % 2 == 0) error.EvenHead else error.OddHead;
+}
+
 fn leafOnlyWith(_: *const Ctx, _: *zigprop.Case, t: Tree) anyerror!bool {
     return t.kids.len == 0;
 }
@@ -245,6 +265,13 @@ fn runCheckWithSlice(a: std.mem.Allocator) anyerror!Outcome {
     return Outcome.of(r);
 }
 
+fn runCheckWithSliceError(a: std.mem.Allocator) anyerror!Outcome {
+    var r = try zigprop.checkWith(a, []const u8, *const Ctx, &ctx3, null, shortSliceOrErrorWith, .{ .seed = 3, .max_cases = 20, .shrink_budget = budget });
+    defer r.deinit();
+    if (r == .failed) try std.testing.expect(r.failed.failure == .returned_error);
+    return Outcome.of(r);
+}
+
 /// The OrError wrapper: only the error is observable, so the outcome
 /// is the variant it maps to (`error.PropertyFailed` for a failure).
 fn runCheckWithOrErrorTree(a: std.mem.Allocator) anyerror!Outcome {
@@ -274,6 +301,20 @@ test "oom: check over []const u8 survives every allocation failure" {
 
 test "oom: checkWith over a recursive type survives every allocation failure" {
     try expectOomSafe("checkWith Tree", runCheckWithTree);
+}
+
+test "oom: a property error survives every allocation failure with the same error" {
+    try expectOomSafe("checkWith []const u8 returning errors", runCheckWithSliceError);
+}
+
+test "oom: outcomes that differ only in the property's error are not equal" {
+    const even: Outcome = .{ .tag = .failed, .failure = .{ .returned_error = error.EvenHead } };
+    const odd: Outcome = .{ .tag = .failed, .failure = .{ .returned_error = error.OddHead } };
+    const falsy: Outcome = .{ .tag = .failed, .failure = .returned_false };
+    try std.testing.expect(even.eql(even));
+    try std.testing.expect(!even.eql(odd));
+    try std.testing.expect(!even.eql(falsy));
+    try std.testing.expect(!even.eql(.{ .tag = .failed }));
 }
 
 test "oom (full): every entry point, the regression path and small max_depth recursive types" {

@@ -113,12 +113,17 @@ Which milestone moved which number (per the milestone commits): M2, M4a, M4b and
   TLA+ as a protocol property.
 - Random-mode draw correctness (uniformity of `intRangeLessThan`
   usage) and replay exhaustion interplay are only partially tested.
-- OOM: `tests/oom.zig` fails each allocation of a run in turn, both
+- OOM: `tests/oom.zig` fails each `alloc` call of a run in turn, both
   from that point on and as a single transient failure, and requires
   `error.OutOfMemory` or the result of the run without failures
-  (variant, origin, choices, shrunk choices, failure kind, evaluations,
-  shrink outcome), with no leaks. `zig build test` covers `check` on
-  `[]const u8` and `checkWith` on a recursive type; `zig build oom-full`
+  (variant, origin, choices, shrunk choices, the `Failure` compared with
+  `Failure.eql`, so a property error must keep its name, evaluations,
+  shrink outcome), with no leaks. Only `alloc` fails: `resize` and
+  `remap` always pass through to the child allocator, so a path taken
+  only when they fail is not exercised. `zig build test` covers `check`
+  on `[]const u8`, `checkWith` on a recursive type, and `checkWith` on
+  `[]const u8` with a property that fails by returning one of two
+  errors; `zig build oom-full`
   adds `check` on a recursive type, `u32` and a recursive union,
   `checkWith` on `[]const u8`, `checkWithOrError`, and the regression
   replay path. Each case is one seed with small limits and budget, so
