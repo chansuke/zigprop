@@ -2,9 +2,10 @@
 Replay normalization and the recorded-choice validity invariant
 (design §2, Must-fix 1).
 
-Mirrors `Source.range` in `src/source.zig`: the sentinel bound 0 passes
-the raw value through; any other bound reduces the recorded value
-modulo the requested bound. The central fact is that a normalized value
+Mirrors the `.replay` branch of `Source.draw` in `src/source.zig`, which
+`range`, `rangeLogUniform` and `rangeModerateFloat` all go through: the
+sentinel bound 0 passes the raw value through; any other bound reduces
+the recorded value modulo the requested bound. The central fact is that a normalized value
 always satisfies the choice validity invariant, for every bound —
 including the sentinel, which the original design's invariant
 (`value < bound`) could not express.

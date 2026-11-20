@@ -11,7 +11,7 @@
         .artifact = "formal/lean/ZigpropFormal/Normalize.lean",
         .impl = .{.{ .file = "src/source.zig", .func = "draw" }},
         .hash = 0x206a3c2320106aa8,
-        .checked_against = "design v2 (§2, MF1): `normalize` over Nat models the replay rule in Source.draw's .replay branch (bound 0 verbatim, else raw % bound). The Lean header names Source.range, which now only calls draw (and `range` is declared twice in src/source.zig). The u64 bridge is not proved; not re-checked against v2.1 or v0.3.",
+        .checked_against = "design v2 (§2, MF1): `normalize` over Nat models the replay rule in Source.draw's .replay branch (bound 0 verbatim, else raw % bound). The Lean header names Source.draw's .replay branch, the path every Source primitive goes through (`range` is declared twice in src/source.zig, so draw is also the unambiguous name here). The u64 bridge is not proved; not re-checked against v2.1 or v0.3.",
     },
     .{
         .artifact = "formal/lean/ZigpropFormal/Zigzag.lean",
