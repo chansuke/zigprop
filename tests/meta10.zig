@@ -655,7 +655,7 @@ test "distribution: float class 4 is finite, normal and of moderate magnitude" {
             const e: i32 = @as(i32, @intCast(mag >> mant_bits)) - bias;
             try std.testing.expect(e >= c[1] and e <= c[2]);
             seen[@intCast(e - c[1])] = true;
-            negatives += sign;
+            negatives += @intCast(sign);
         }
         // Every exponent in the range occurs, and both signs.
         for (seen[0..@intCast(c[2] - c[1] + 1)]) |s| try std.testing.expect(s);

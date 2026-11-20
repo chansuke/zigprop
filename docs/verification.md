@@ -128,11 +128,11 @@ Which milestone moved which number (per the milestone commits): M2, M4a, M4b and
 - Cross-platform behaviour: macOS runs in CI (a macos-latest job,
   green at the v0.3.0 release). 32-bit `usize`: ci.yml has a
   non-blocking `test-32bit` job (`zig build test -Dtarget=x86-linux`)
-  that has not run on Actions yet. Locally (2026-11-20, zig 0.17.1) the
-  x86-linux test build fails to compile at `src/shrink.zig` `passChunks`
-  (a `u64` passed where `usize` is expected), and this machine cannot
-  run 32-bit executables at all (a trivial test exits with SIGILL), so
-  no 32-bit test has run.
+  that has not run on Actions yet. Locally (2026-11-20, zig 0.17.1) all
+  17 x86-linux test binaries compile, after two `u64`-into-`usize`
+  fixes (`src/shrink.zig` `passChunks`, `tests/meta10.zig`), but this
+  machine cannot run 32-bit executables at all (each binary, like a
+  trivial test, exits with SIGILL), so no 32-bit test has run.
 - The v2.1 acceptance rule (key sequences, P4 re-expression) has no
   Lean/TLA+ counterpart yet: the formal artifacts model the v2
   protocol, whose rank abstraction happens to match the key view,

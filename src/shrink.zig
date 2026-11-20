@@ -493,7 +493,7 @@ pub fn shrinkWith(
         fn passChunks(self: *@This()) !bool {
             var changed_any = false;
             if (self.best.len == 0) return false;
-            var chunk: usize = @max(1, highestPow2(@intCast(self.best.len)) / 2);
+            var chunk: usize = @intCast(@max(1, highestPow2(@intCast(self.best.len)) / 2));
             while (true) {
                 if (self.exhausted) break;
                 if (try self.chunkSize(chunk, .p1_chunks)) changed_any = true;
