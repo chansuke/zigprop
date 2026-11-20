@@ -65,6 +65,8 @@ test "api: shrinking preserves the error kind" {
         .regression_id = "k",
     });
     defer r.deinit();
+    // The search started from the entry's 500, not from a random draw.
+    try std.testing.expectEqual(@as(usize, 0), r.failed.origin.regression.index);
     try std.testing.expect(r.failed.failure.eql(.{ .returned_error = error.Big }));
     try std.testing.expectEqual(@as(u64, 100), r.failed.shrunk_choices[0].value);
     try std.testing.expectEqualStrings("100", r.failed.shrunk_value);
@@ -190,6 +192,7 @@ test "display: a mutating property does not corrupt the original" {
         .regression_id = "d",
     });
     defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.failed.origin.regression.index);
     // v0.2 formatted after the property ran and showed { 1, 2, 3 }.
     try std.testing.expectEqualStrings("{ 3, 1, 2 }", r.failed.original_value);
     try std.testing.expectEqualStrings("{ 0, 0, 0 }", r.failed.shrunk_value);
@@ -211,6 +214,7 @@ test "display: a type's own format is used ({f}), others use {any}" {
     const entries = [_]zigprop.Regression{.{ .id = "p", .gen_version = zigprop.generator_version, .choices = &.{ 0, 200 } }};
     var r = try zigprop.check(std.testing.allocator, Point, pointSmall, .{ .regressions = &entries, .regression_id = "p" });
     defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.failed.origin.regression.index);
     try std.testing.expectEqualStrings("P<200>", r.failed.original_value);
     try std.testing.expectEqualStrings("P<10>", r.failed.shrunk_value);
 }

@@ -224,6 +224,7 @@ test "stale: fail_on_stale is honored by the OrError wrappers only" {
     var r = try zigprop.checkCustom(std.testing.allocator, u32, singleDraw, alwaysTrue, .{ .regressions = &entries, .regression_id = "v", .max_cases = 1, .fail_on_stale = true });
     defer r.deinit();
     try std.testing.expect(r == .passed);
+    try std.testing.expectEqual(@as(usize, 1), r.passed.regressions.stale.len);
 }
 
 fn genShifted(ctx: *GenContext) anyerror!u32 {
