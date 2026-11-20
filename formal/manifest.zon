@@ -30,7 +30,16 @@
             .{ .file = "src/shrink.zig", .func = "tryRatchet" },
         },
         .hash = 0xdf3eeeff5e2b32e5,
-        .checked_against = "design v2 (pre-v2.1): shortlex as a strict order on List Nat values. The implementation compares skip-filtered u64 key sequences (v2.1, keyShortlexLess via tryAccept), and tryRatchet's key-equal lateral move has no Lean counterpart; neither is modelled, and the artifact was not re-checked against v2.1 or v0.3.",
+        .checked_against = "design v2 (pre-v2.1): shortlex as a strict order on List Nat values, and well-founded (shortlex_wf, lex_wf_of_length). The implementation compares skip-filtered u64 key sequences (v2.1, keyShortlexLess via tryAccept); that comparison and the u64/Nat bridge are not proved, and tryRatchet's lateral move is in Measure.lean, not here. Not re-checked against v0.3.",
+    },
+    .{
+        .artifact = "formal/lean/ZigpropFormal/Measure.lean",
+        .impl = .{
+            .{ .file = "src/shrink.zig", .func = "tryAccept" },
+            .{ .file = "src/shrink.zig", .func = "tryRatchet" },
+        },
+        .hash = 0x61642f3ce381f566,
+        .checked_against = "design v2.1 measure (key shortlex, pairs outside class 3): measureLt_wf proves the order well-founded over List Nat × Nat. accept_decreases and ratchet_decreases only restate their hypotheses; that tryAccept and tryRatchet lower the measure is observed by the accept hook in tests/meta9.zig, not proved. The u64/Nat bridge is not proved.",
     },
     .{
         .artifact = "formal/tla/ZigpropRunner.tla",
@@ -38,7 +47,7 @@
             .{ .file = "src/runner.zig", .func = "checkWith" },
             .{ .file = "src/shrink.zig", .func = "shrinkWith" },
         },
-        .hash = 0x904fdfe396446c2f,
+        .hash = 0x4af9ff13da87f4ee,
         .checked_against = "design v2 (§5-§7) + one v0.3 header note + P4 (v2.1) as ShrinkRatchet over a number nc: a finite rank abstraction of the runner/shrink protocol, not a refinement of the implementation; it does not check that tryRatchet counts or rewrites pairs as modelled. shrinkWith's hash covers every pass, since they are nested in its body.",
     },
 }

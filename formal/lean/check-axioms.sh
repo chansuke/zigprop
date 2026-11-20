@@ -14,6 +14,12 @@ import ZigpropFormal
 #print axioms ZigpropFormal.zigzagDecode_natAbs_mono
 #print axioms ZigpropFormal.shortlex_trans
 #print axioms ZigpropFormal.shortlex_asymm
+#print axioms ZigpropFormal.lex_wf_of_length
+#print axioms ZigpropFormal.shortlex_wf
+#print axioms ZigpropFormal.measureLt_wf
+#print axioms ZigpropFormal.accept_decreases
+#print axioms ZigpropFormal.ratchet_decreases
+#print axioms ZigpropFormal.no_infinite_descent
 EOF
 trap 'rm -f AxiomsAudit.lean' EXIT
 

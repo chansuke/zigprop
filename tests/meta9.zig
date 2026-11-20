@@ -169,6 +169,11 @@ const Monitor = struct {
     /// Non-lateral acceptances whose keys were not strictly smaller,
     /// and lateral (P4) ones whose keys changed.
     violations: usize = 0,
+    /// P4 lateral moves seen, and those that did not lower the number
+    /// of pairs outside class 3 or changed a position outside one pair.
+    laterals: usize = 0,
+    lateral_count_violations: usize = 0,
+    lateral_position_violations: usize = 0,
     by_pass: [@typeInfo(zigprop.internal.ShrinkPass).@"enum".field_names.len]usize = @splat(0),
 
     fn hook(self: *Monitor) zigprop.internal.AcceptHook {
@@ -183,6 +188,10 @@ const Monitor = struct {
         const larger = filteredLess(e.before_keys, e.before_skips, e.after_keys, e.after_skips);
         if (e.lateral) {
             if (smaller or larger) self.violations += 1;
+            self.laterals += 1;
+            if (nonCanonicalPairs(e.after_choices, e.after_skips) >= nonCanonicalPairs(e.before_choices, e.before_skips))
+                self.lateral_count_violations += 1;
+            if (!changesOnePair(e.before_choices, e.after_choices, e.before_skips)) self.lateral_position_violations += 1;
         } else if (!smaller) {
             self.violations += 1;
         }
@@ -192,6 +201,34 @@ const Monitor = struct {
         return self.by_pass[@backingInt(pass)];
     }
 };
+
+/// Pairs outside class 3, counted independently of the shrinker: a pair
+/// is a non-skip position followed by a skip position (design v2.1
+/// §4.1), and its class is the value at the first position.
+fn nonCanonicalPairs(choices: []const Choice, skips: []const bool) usize {
+    var n: usize = 0;
+    for (0..choices.len -| 1) |i| {
+        if (!skips[i] and skips[i + 1] and choices[i].value != 3) n += 1;
+    }
+    return n;
+}
+
+/// Whether `after` has the length of `before` and differs from it only
+/// at one pair's two positions (i, i + 1).
+fn changesOnePair(before: []const Choice, after: []const Choice, skips: []const bool) bool {
+    if (before.len != after.len) return false;
+    var first: ?usize = null;
+    for (before, after, 0..) |b, a, k| {
+        if (b.value == a.value) continue;
+        const start = first orelse blk: {
+            first = k;
+            break :blk k;
+        };
+        if (k != start and k != start + 1) return false;
+    }
+    const i = first orelse return false;
+    return i + 1 < skips.len and !skips[i] and skips[i + 1];
+}
 
 /// Independent shortlex check over the filtered key sequences (the
 /// test does not reuse the shrinker's comparison).
@@ -327,8 +364,31 @@ fn monitorSeeds(comptime T: type, property: *const fn (T) bool, limits: zigprop.
         _ = try shrinkFrom(T, a, property, limits, vals, .{ .on_accept = mon.hook() });
         try std.testing.expectEqual(@as(usize, 0), mon.violations);
         total.accepts += mon.accepts;
+        total.laterals += mon.laterals;
+        total.lateral_count_violations += mon.lateral_count_violations;
+        total.lateral_position_violations += mon.lateral_position_violations;
         for (&total.by_pass, mon.by_pass) |*x, y| x.* += y;
     }
+}
+
+fn below1000(x: u32) bool {
+    return x < 1000;
+}
+
+test "shrink: P4's lateral move keeps the keys, lowers the pairs outside class 3, and changes one pair" {
+    // The accept hook over the T6/T7 shapes and a u32 bound, seeds
+    // 0..9. Every P4 acceptance must be key-equal, have fewer pairs
+    // outside class 3 than before (counted here, not by the shrinker),
+    // and differ from the stored sequence only at one pair (i, i + 1).
+    var total = Monitor{};
+    try monitorSeeds(Tree, noSevenTree, t6_limits, &total);
+    try monitorSeeds([]const u8, noSevenBytes, .{}, &total);
+    try monitorSeeds(u32, below1000, .{}, &total);
+    try std.testing.expectEqual(@as(usize, 0), total.lateral_count_violations);
+    try std.testing.expectEqual(@as(usize, 0), total.lateral_position_violations);
+    // Path evidence: P4 accepted at least once, so the checks above ran.
+    try std.testing.expect(total.laterals > 0);
+    try std.testing.expectEqual(total.laterals, total.count(.p4_reexpress));
 }
 
 test "shrink: new passes never accept a non-smaller candidate" {

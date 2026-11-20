@@ -68,6 +68,12 @@ pub const AcceptEvent = struct {
     /// The failure kind of the accepted candidate (design v0.3 §5.4:
     /// always equal to the original failure's kind).
     failure: Failure,
+    /// The stored and the accepted choice sequences. A pair's class is
+    /// the value at its first position, which the keys do not carry, so
+    /// a test needs these to count the pairs outside class 3 that P4
+    /// lowers.
+    before_choices: []const Choice,
+    after_choices: []const Choice,
 };
 
 // ---------------------------------------------------------------------
@@ -425,6 +431,8 @@ pub fn shrinkWith(
                 .after_keys = f.keys,
                 .after_skips = f.skips,
                 .failure = f.failure,
+                .before_choices = self.best,
+                .after_choices = f.choices,
             });
         }
 
