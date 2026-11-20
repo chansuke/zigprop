@@ -204,7 +204,7 @@ pub fn checkFormalDrift(arena: Allocator, repo: Repo, out: *std.ArrayList(Locate
 
 const wiring_reason = "A test file that no build.zig list names is never compiled or run, so its tests are evidence in name only (015ce66: tests/meta5.zig was silently unwired because a build.zig edit did not match).";
 const citation_reason = "docs/verification.md is the map from claims to evidence; a cited path or test name that does not exist is a claim with no evidence behind it (aa71b5a, c007748). Test-name rule, applied as written: on a table row (a line starting with `|`) that cites at least one existing tests/ .zig file, every straight double-quoted span without an ellipsis (`…` or `...`) is read as a test name and must equal the name of a `test \"...\"` declaration in one of the .zig files that row cites under tests/.";
-const path_reason = "A regression-driven test can pass while the regression path never ran (a non-failing or stale entry falls back to random search); the block must read the report's path evidence to show which path was taken (c007748, I3; improvement log case 3). Plan §2-2 rule C check 3 amendment (2026-11-20, director): the evidence identifiers are read as v0.3's origin union and regressions summary. Rule: a `test` block that contains both `.regressions =` and a call whose name starts with `check` must read `.origin` (`r.failed.origin.regression.index`, `f.origin == .regression`, `switch (r.failed.origin)`) or a report variant's `.regressions` summary (`r.passed.regressions.passed`, `p.regressions.stale`). Evidence is a field access: the token before `.` is an identifier, `)` or `]`, and the token after the name is not `=`, so the configuration's `.{ .regressions = ... }` never counts.";
+const path_reason = "A regression-driven test can pass while the regression path never ran (a non-failing or stale entry falls back to random search); the block must read the report's path evidence to show which path was taken (c007748, I3; improvement log case 3). Plan §2-2 rule C check 3 amendment (2026-11-20, director): the evidence identifiers are read as v0.3's origin union and regressions summary. Rule: a `test` block that contains both `.regressions =` and a call whose name starts with `check` must read `.origin` (`r.failed.origin.regression.index`, `f.origin == .regression`, `switch (r.failed.origin)`) or a report variant's `.regressions` summary (`r.passed.regressions.passed`, `p.regressions.stale`). Evidence is a read of a field chain through `.origin` or `.regressions`: the token before `.` is an identifier, `)` or `]`, and the chain (`.name`, `.?`, `.*`, `[...]`) does not end as the target of `=` or a compound assignment, so `.{ .regressions = ... }`, `r.failed.origin.regression.index = 0` and `x.regressions.len -= 1` never count. This is a syntactic search for a report-like field-chain read: it does not establish that the receiver is the report returned by the block's `check*` call, nor that the read is asserted.";
 
 fn hasPath(paths: []const []const u8, p: []const u8) bool {
     for (paths) |q| if (std.mem.eql(u8, q, p)) return true;
@@ -360,6 +360,29 @@ pub fn checkCitations(arena: Allocator, repo: Repo, out: *std.ArrayList(Located)
     }
 }
 
+/// Whether the field chain continuing at `start` (`.name`, `.?`, `.*`,
+/// `[...]`) ends as the target of `=` or a compound assignment.
+fn chainIsAssigned(toks: []const Token, start: usize) bool {
+    var j = start;
+    while (j < toks.len) {
+        switch (toks[j].tag) {
+            .period => if (j + 1 < toks.len and (toks[j + 1].tag == .identifier or toks[j + 1].tag == .question_mark)) {
+                j += 2;
+            } else return false,
+            .period_asterisk => j += 1,
+            .l_bracket => j = matchingClose(toks, j, .l_bracket, .r_bracket) + 1,
+            else => break,
+        }
+    }
+    if (j >= toks.len) return false;
+    const op = toks[j].tag.lexeme() orelse return false;
+    if (op[op.len - 1] != '=') return false;
+    for ([_][]const u8{ "==", "!=", "<=", ">=" }) |cmp| {
+        if (std.mem.eql(u8, op, cmp)) return false;
+    }
+    return true;
+}
+
 /// Check 3: a `test` block that sets `.regressions =` and calls a `check*`
 /// function reads the report's `.origin` or a variant's `.regressions`
 /// summary (rule in path_reason).
@@ -380,7 +403,7 @@ pub fn checkPathEvidence(arena: Allocator, repo: Repo, out: *std.ArrayList(Locat
                 if (toks[k].tag != .identifier) continue;
                 const field = k > 0 and toks[k - 1].tag == .period;
                 const assigned = k + 1 < toks.len and toks[k + 1].tag == .equal;
-                const read = field and !assigned and k > 1 and switch (toks[k - 2].tag) {
+                const read = field and !chainIsAssigned(toks, k + 1) and k > 1 and switch (toks[k - 2].tag) {
                     .identifier, .r_paren, .r_bracket => true,
                     else => false,
                 };
@@ -609,14 +632,33 @@ test "evidence-integrity check 3: regression tests must read .origin or the regr
         \\    const o: Origin = .{ .origin = undefined };
         \\    _ = .{ r, o };
         \\}
+        \\test "an assigned origin chain is not evidence" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    r.failed.origin.regression.index = 0;
+        \\}
+        \\test "an assigned regressions chain is not evidence" {
+        \\    config.regressions = &e;
+        \\    config.regressions.len = 0;
+        \\    var r = try zigprop.check(a, u32, p, config);
+        \\    _ = r;
+        \\}
+        \\test "a compound assignment is not evidence" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    r.passed.regressions.stale[0].seed -= 1;
+        \\}
+        \\test "a compared chain is evidence" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    try expect(r.failed.origin.regression.index <= 0);
+        \\}
         \\test "no regressions" {
         \\    var r = try zigprop.check(a, u32, p, .{ .seed = 1 });
         \\    _ = r;
         \\}
     }};
     const got = try run(arena, repo);
-    try expectChecks(&.{ .@"path-evidence", .@"path-evidence", .@"path-evidence" }, got);
+    const fired = [_][]const u8{ "bare", "a nonexistent identifier", "setting fields", "an assigned origin chain", "an assigned regressions chain", "a compound assignment" };
+    const expected: [fired.len]?Check = @splat(.@"path-evidence");
+    try expectChecks(&expected, got);
     try std.testing.expectEqual(@as(usize, 1), got[0].v.line);
-    try std.testing.expect(std.mem.indexOf(u8, got[1].v.what, "a nonexistent identifier") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got[2].v.what, "setting fields") != null);
+    for (fired, got) |name, l| try std.testing.expect(std.mem.indexOf(u8, l.v.what, name) != null);
 }
