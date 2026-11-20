@@ -24,7 +24,7 @@ implementation's acceptances through the accept hook.
 | `ZigpropRunnerEmpty.cfg` | No rank fails: the run must pass | No error |
 | `ZigpropRunnerZero.cfg` | Only rank 0 fails: the first failure is already minimal | No error |
 | `ZigpropRunnerNoDiscard.cfg` | No discards tolerated | No error |
-| `ZigpropRunnerRatchet.cfg` | P4's lateral move with the decrease check, budget above the measure bound | No error |
+| `ZigpropRunnerRatchet.cfg` | P4's lateral move with the decrease check, budget with room above the measure bound | No error |
 | `ZigpropRunnerRatchetBad.cfg` | The same without the decrease check | `AcceptsBoundedByMeasure` is violated |
 
 The first four set `MaxNC = 0`, so `ShrinkRatchet` is never enabled.
@@ -57,12 +57,14 @@ Do not commit them.
 
 ## Why `tryRatchet` must check that `nc` goes down
 
-`AcceptsBoundedByMeasure` says that the number of acceptances is bounded
-by the measure (rank, `nc`), whatever the budget. In
+`AcceptsBoundedByMeasure` says that the number of acceptances is at most
+the measure bound, independently of the budget. In
 `ZigpropRunnerRatchet.cfg` the bound is (3 + 1) × (2 + 1) − 1 = 11, and
-TLC reaches 11 acceptances, so the bound is tight. `MaxBudget = 16` is
-above it, so the budget does not stop shrinking first: termination comes
-from the measure.
+TLC reaches 11 acceptances, so the bound is tight. `MaxBudget = 16`
+leaves room for more than 11 acceptances, so the budget alone does not
+make the check hold. The measure bounds acceptances only, not the run:
+`ShrinkReject` also spends a budget unit and leaves the measure
+unchanged, so a run can exhaust the budget with no acceptance at all.
 
 Without the decrease check, a lateral move may keep `nc` unchanged. Then
 nothing the measure sees changes, and only the budget stops the

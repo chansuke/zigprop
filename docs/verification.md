@@ -171,7 +171,8 @@ Which milestone moved which number (per the milestone commits): M2, M4a, M4b and
   P4's lateral move is modelled abstractly as `ShrinkRatchet`, which
   keeps the rank and lowers a number `nc` of pairs outside class 3:
   `formal/tla/ZigpropRunnerRatchet.cfg` checks that acceptances are
-  bounded by the measure (rank, `nc`) with the budget above that bound,
+  bounded by the measure (rank, `nc`) independently of the budget,
+  whose 16 units leave room for more acceptances than that bound,
   and `formal/tla/ZigpropRunnerRatchetBad.cfg` shows the violation
   without the decrease check (`formal/tla/README.md`). The model does
   not check that `tryRatchet` counts or rewrites pairs that way. The
