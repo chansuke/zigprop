@@ -419,6 +419,10 @@ const Value = union(enum) { int: i64, str: []const u8, list: []const Value };
 const Opt = struct { x: u8, child: ?*const u8 = null }; // not generated; type-level only
 const ArrRec = struct { pair: [2]?ArrRecBox, v: u8 };
 const ArrRecBox = struct { inner: []const ArrRec };
+// A single-variant union on the recursive channel: at a cut m = 1.
+const OneNode = struct { v: u8, c: union(enum) { kids: []const OneNode } };
+
+const cut_zoo = .{ Tree, MA, MB, Json, Pair, E, Bin, List, Node, ZNode, ZNode2, Tree2, Other, Tree3, Value, ArrRec, ArrRecBox, OneNode };
 
 fn zeroReplayCut(comptime R: type) !bool {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -444,7 +448,7 @@ test "cut: cutExists agrees with generateCut on every listed type" {
     // !cutExistsRel(R, R). (For legal Zig types every route back to R
     // passes a slice or an optional, so every listed type has a cut
     // form; M0-a found no constructible m = 0 union.)
-    inline for (.{ Tree, MA, MB, Json, Pair, E, Bin, List, Node, ZNode, ZNode2, Tree2, Other, Tree3, Value, ArrRec, ArrRecBox }) |R| {
+    inline for (cut_zoo) |R| {
         errdefer std.debug.print("cut agreement differs for {s}\n", .{@typeName(R)});
         try std.testing.expectEqual(cut.cutExistsRel(R, R), try zeroReplayCut(R));
     }
@@ -453,6 +457,7 @@ test "cut: cutExists agrees with generateCut on every listed type" {
     try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, cut.admissible(List, List));
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, cut.admissible(E, E));
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, cut.admissible(Value, Value));
+    try std.testing.expectEqualSlices(usize, &.{0}, cut.admissible(@FieldType(OneNode, "c"), OneNode));
     // Reachability (§1.3 edges).
     try std.testing.expect(cut.reaches(Pair, Json) and cut.reaches(Json, Pair));
     try std.testing.expect(!cut.reaches(Color, Node));
@@ -533,6 +538,110 @@ test "cut: Json at the limit draws among admissible variants" {
         }
     }
     try std.testing.expect(saw_str and saw_empty_list);
+}
+
+/// The choices recorded by an all-zero replay of a lone u8.
+fn zeroU8Choices(a: std.mem.Allocator) ![]const Choice {
+    const zeros: [64]Choice = @splat(.{ .bound = 0, .value = 0 });
+    var src = zigprop.internal.Source.initReplay(a, &zeros, 100_000);
+    var st: GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&st, &src, a, .{});
+    _ = try zigprop.generate(u8, &ctx);
+    return src.recorded.items;
+}
+
+fn expectNoIndexOne(choices: []const Choice) !void {
+    for (choices) |c| try std.testing.expect(c.bound != 1);
+}
+
+test "cut: a single admissible variant (m = 1) draws no tag" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const u8_draws = try zeroU8Choices(a);
+
+    // OneNode's cut form from all zeros at max_depth 0: the u8 field's
+    // draws and nothing else; the m = 1 union records no tag draw.
+    {
+        const zeros: [64]Choice = @splat(.{ .bound = 0, .value = 0 });
+        var src = zigprop.internal.Source.initReplay(a, &zeros, 100_000);
+        var st: GenState = undefined;
+        var ctx = zigprop.internal.genContextForTest(&st, &src, a, .{ .max_depth = 0 });
+        const n = try cut.generateCut(OneNode, &ctx);
+        try std.testing.expectEqual(@as(u8, 0), n.v);
+        try std.testing.expectEqual(@as(usize, 0), n.c.kids.len);
+        try std.testing.expectEqual(u8_draws.len, src.pos);
+        try std.testing.expectEqualSlices(Choice, u8_draws, src.recorded.items);
+        // Path evidence: no index(1) draw was recorded.
+        try expectNoIndexOne(src.recorded.items);
+    }
+
+    // Through generate at max_depth 0: the root's union is generated
+    // normally (an index(1) tag draw), its one kid is cut and records
+    // only its u8 draws.
+    {
+        var values: [64]Choice = @splat(.{ .bound = 0, .value = 0 });
+        values[u8_draws.len + 1].value = 1; // the root's kids length
+        var src = zigprop.internal.Source.initReplay(a, &values, 100_000);
+        var st: GenState = undefined;
+        var ctx = zigprop.internal.genContextForTest(&st, &src, a, .{ .max_depth = 0 });
+        const n = try zigprop.generate(OneNode, &ctx);
+        try std.testing.expectEqual(@as(usize, 1), n.c.kids.len);
+        try std.testing.expectEqual(@as(usize, 0), n.c.kids[0].c.kids.len);
+        try std.testing.expectEqual(2 * u8_draws.len + 2, src.pos);
+        const rec = src.recorded.items;
+        try std.testing.expectEqual(@as(u64, 1), rec[u8_draws.len].bound); // the root's tag draw
+        const kid = rec[u8_draws.len + 2 ..];
+        try std.testing.expectEqualSlices(Choice, u8_draws, kid);
+        try expectNoIndexOne(kid);
+    }
+}
+
+/// The unions reachable from R (through fields, payloads, slices,
+/// optionals and arrays) that themselves reach R, i.e. the unions a cut
+/// of R can meet.
+fn unionsCutWithin(comptime R: type) []const type {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var seen: []const type = &.{};
+        var todo: []const type = &.{R};
+        var out: []const type = &.{};
+        while (todo.len > 0) {
+            const T = todo[0];
+            todo = todo[1..];
+            const known = for (seen) |S| {
+                if (S == T) break true;
+            } else false;
+            if (known) continue;
+            seen = seen ++ &[_]type{T};
+            switch (@typeInfo(T)) {
+                .@"struct" => |st| todo = todo ++ st.field_types,
+                .@"union" => |un| {
+                    if (cut.reaches(T, R)) out = out ++ &[_]type{T};
+                    todo = todo ++ un.field_types;
+                },
+                .optional => |o| todo = todo ++ &[_]type{o.child},
+                .array => |arr| todo = todo ++ &[_]type{arr.child},
+                .pointer => |p| todo = todo ++ &[_]type{p.child},
+                else => {},
+            }
+        }
+        return out;
+    }
+}
+
+test "cut: every union a cut of a listed type meets has an admissible variant (m = 0 unreachable)" {
+    // M0-a believed m = 0 unreachable; this pins it for the listed types.
+    comptime var pairs: usize = 0;
+    inline for (cut_zoo) |R| {
+        inline for (comptime unionsCutWithin(R)) |Un| {
+            if (comptime cut.admissible(Un, R).len == 0)
+                @compileError("m = 0 at a cut of " ++ @typeName(R) ++ ": " ++ @typeName(Un));
+            pairs += 1;
+        }
+    }
+    // Not vacuous: Json, Pair, E, List, Value and OneNode each meet one.
+    try std.testing.expect(pairs >= 6);
 }
 
 fn otherDepth(o: Other) usize {
