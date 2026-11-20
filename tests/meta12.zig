@@ -263,6 +263,9 @@ test "workflow: an empty choice list prints a pasteable entry" {
 }
 
 test "workflow: a multi-choice entry is printed in zig fmt's tuple form" {
+    // zigprop-lint: allow path-evidence the claim is the tuple form
+    // regressionEntry prints for two shrunk choices, which is the same
+    // whichever path found the failure.
     const entries = [_]zigprop.Regression{.{ .id = "m", .gen_version = zigprop.generator_version, .choices = &.{ 3, 4000000000 } }};
     var r = try zigprop.check(std.testing.allocator, u32, smallOnly, .{ .regressions = &entries, .regression_id = "m" });
     defer r.deinit();
@@ -276,6 +279,9 @@ test "workflow: a multi-choice entry is printed in zig fmt's tuple form" {
 }
 
 test "zon: tests/regressions.zon imports as a RegressionFile" {
+    // zigprop-lint: allow path-evidence the claim is that regressions.zon
+    // coerces to RegressionFile at compile time, and its entries are empty,
+    // so no regression path can run.
     const file: zigprop.RegressionFile = @import("regressions.zon");
     try std.testing.expectEqual(@as(u32, 1), file.version);
     // Its entries can be handed to Config directly.

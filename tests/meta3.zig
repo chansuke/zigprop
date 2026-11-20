@@ -200,6 +200,9 @@ test "shrink: a generator error during shrinking propagates, never becomes an ou
         .regressions = &entries,
         .regression_id = "t",
     }));
+    // zigprop-lint: allow path-evidence checkCustom returns error.Boom
+    // instead of a report, so there is no `.origin` to read, and the
+    // evidence is first_failing, outside the report.
     // Path evidence: the one generated value was the entry's 25 and it
     // failed, so Boom (the second generator call) came after the first
     // failure, during shrinking.
