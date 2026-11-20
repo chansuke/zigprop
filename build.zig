@@ -160,6 +160,17 @@ pub fn build(b: *std.Build) void {
     const compile_budget_step = b.step("compile-budget", "Compile and run tests/compile_budget.zig with a fresh cache within 120 s");
     compile_budget_step.dependOn(&compile_budget.step);
 
+    // Consumer smoke (tests/consumer/): a downstream project that depends on
+    // this package by path, built with a fresh local cache. Release-time only
+    // (release.yml); not part of verify or verify-full.
+    const consumer = b.addSystemCommand(&.{ "sh", "-c", "rm -rf \"$0\" && exec \"$1\" build test --build-file \"$2\" --cache-dir \"$0\" --summary all" });
+    _ = consumer.addOutputDirectoryArg("cache");
+    consumer.addArg(b.graph.zig_exe);
+    consumer.addFileArg(b.path("tests/consumer/build.zig"));
+    consumer.has_side_effects = true;
+    const consumer_step = b.step("consumer", "Build and test tests/consumer/ against this package with a fresh cache");
+    consumer_step.dependOn(&consumer.step);
+
     // The paths ci.yml passed to `zig fmt --check` before it called fmt-check, plus tools.
     const fmt_paths: []const std.Build.LazyPath = &.{ b.path("src"), b.path("tests"), b.path("bench"), b.path("validation"), b.path("tools"), b.path("build.zig"), b.path("build.zig.zon") };
     const fmt_check_step = b.step("fmt-check", "Check formatting (zig fmt --check); on failure run `zig build fmt`");

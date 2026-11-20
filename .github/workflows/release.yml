@@ -1,0 +1,158 @@
+name: Release
+
+# Checks a release tag before its notes are published, then smokes the
+# published tag tarball from a downstream project. A failed check leaves
+# the tag in place; fix forward with the next patch version.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to check and publish, such as v0.3.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  # The same Lean and TLC checks as formal.yml, on this commit. A release
+  # commit only changes build.zig.zon's version, which matches none of
+  # formal.yml's path filters, so formal.yml would not run on it by itself.
+  formal:
+    uses: ./.github/workflows/formal.yml
+
+  verify-release:
+    name: verify the tagged commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.17.1
+      - name: zig build verify-full
+        run: zig build verify-full --summary all
+      - name: build.zig.zon version equals the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(grep -oE '^ *\.version = "[^"]+"' build.zig.zon | cut -d'"' -f2)
+          if [ "v$version" != "$TAG" ]; then
+            echo "build.zig.zon has version $version, the tag is $TAG" >&2
+            exit 1
+          fi
+      - name: README status names this version as the latest release
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -qF "**Status: the latest release is $TAG.**" README.md || {
+            echo "README.md's Status line does not say '**Status: the latest release is $TAG.**'" >&2
+            exit 1
+          }
+      - name: Validation labels match the targets validation runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_label=$(grep -oE 'validation targets T[0-9][^"]*' build.zig | cut -d' ' -f3)
+          ci_label=$(grep -oE 'Validation targets \(T[^)]*\)' .github/workflows/ci.yml | tr -d '()' | cut -d' ' -f3)
+          if [ "$build_label" != "$ci_label" ]; then
+            echo "build.zig says $build_label, ci.yml says $ci_label" >&2
+            exit 1
+          fi
+          zig build validation 2> validation.txt
+          targets=$(grep -oE '^T[0-9]+[a-z]* criterion' validation.txt | cut -d' ' -f1 | sort -u)
+          lo=${build_label%-*}
+          hi=${build_label#*-}
+          lo_n=${lo#T}; lo_n=${lo_n%%[a-z]*}
+          hi_n=${hi#T}; hi_n=${hi_n%%[a-z]*}
+          for end in "$lo" "$hi"; do
+            echo "$targets" | grep -qx "$end" || { echo "label $build_label names $end, which validation does not run" >&2; exit 1; }
+          done
+          for t in $targets; do
+            n=${t#T}; n=${n%%[a-z]*}
+            if [ "$n" -lt "$lo_n" ] || [ "$n" -gt "$hi_n" ]; then
+              echo "validation runs $t, outside the label $build_label" >&2
+              exit 1
+            fi
+          done
+      - name: docs/verification.md has this version's validation record
+        shell: bash
+        run: |
+          set -euo pipefail
+          minor=$(echo "${TAG#v}" | cut -d. -f1,2)
+          grep -q "^## v$minor validation record" docs/verification.md || {
+            echo "docs/verification.md has no '## v$minor validation record' section" >&2
+            exit 1
+          }
+      - name: Consumer smoke (path dependency, fresh cache)
+        run: zig build consumer
+
+  publish:
+    name: publish the release notes
+    needs: [formal, verify-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Create the GitHub release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" --repo "${{ github.repository }}" --verify-tag --generate-notes
+
+  post-release-smoke:
+    name: smoke the published tag tarball
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.17.1
+      - name: Build tests/consumer/ against the tag tarball
+        shell: bash
+        working-directory: tests/consumer
+        run: |
+          set -euo pipefail
+          # Drop the path dependency, then let zig fetch add the tarball
+          # with its hash. A fetched package keeps only build.zig.zon's
+          # .paths, which a path dependency does not check.
+          cat > build.zig.zon <<'ZON'
+          .{
+              .name = .zigprop_consumer,
+              .version = "0.0.0",
+              .fingerprint = 0xe540d7659e62b6f4,
+              .minimum_zig_version = "0.17.0",
+              .dependencies = .{},
+              .paths = .{ "build.zig", "build.zig.zon", "consumer.zig" },
+          }
+          ZON
+          zig fetch --save=zigprop "${{ github.server_url }}/${{ github.repository }}/archive/refs/tags/$TAG.tar.gz"
+          {
+            echo "Package hash of $TAG:"
+            echo '```'
+            grep -E '\.hash = ' build.zig.zon
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          zig build test --summary all
+      - name: Open an issue if the smoke failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Post-release smoke failed for $TAG" \
+            --body "The consumer project did not build or pass against the $TAG tarball: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
