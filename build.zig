@@ -92,8 +92,8 @@ pub fn build(b: *std.Build) void {
     lint_step.dependOn(&run_lint.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lint_mod })).step);
 
-    // Golden-pin diff classifier (tools/pinguard). Not part of `verify`, which
-    // needs no base revision: this is the one CI step outside verify (ci.yml).
+    // Golden-pin diff classifier (tools/pinguard). Not part of `verify-full`, which
+    // needs no base revision: this is the one CI step outside verify-full (ci.yml).
     const pinguard_mod = b.createModule(.{
         .root_source_file = b.path("tools/pinguard/main.zig"),
         .target = b.graph.host,
@@ -122,6 +122,18 @@ pub fn build(b: *std.Build) void {
         pin_step.dependOn(&b.addFail("pin-guard needs -Dpin-base=<rev>").step);
     }
 
+    // Compile budget (tests/compile_budget.zig): a fresh-cache compile and run
+    // must finish within 120 s. The limit lives here, so local runs and CI share it.
+    // The run's output directory survives between runs, so it is emptied first.
+    const compile_budget = b.addSystemCommand(&.{ "sh", "-c", "rm -rf \"$0\" && exec timeout --kill-after=10 120 \"$1\" test --dep zigprop \"-Mroot=$2\" \"-Mzigprop=$3\" --cache-dir \"$0\"" });
+    _ = compile_budget.addOutputDirectoryArg("cache");
+    compile_budget.addArg(b.graph.zig_exe);
+    compile_budget.addFileArg(b.path("tests/compile_budget.zig"));
+    compile_budget.addFileArg(b.path("src/root.zig"));
+    compile_budget.has_side_effects = true;
+    const compile_budget_step = b.step("compile-budget", "Compile and run tests/compile_budget.zig with a fresh cache within 120 s");
+    compile_budget_step.dependOn(&compile_budget.step);
+
     // The paths ci.yml passed to `zig fmt --check` before it called fmt-check, plus tools.
     const fmt_paths: []const std.Build.LazyPath = &.{ b.path("src"), b.path("tests"), b.path("bench"), b.path("validation"), b.path("tools"), b.path("build.zig"), b.path("build.zig.zon") };
     const fmt_check_step = b.step("fmt-check", "Check formatting (zig fmt --check); on failure run `zig build fmt`");
@@ -132,9 +144,10 @@ pub fn build(b: *std.Build) void {
     const fmt_step = b.step("fmt", "Format the sources in place (whitespace and deprecated builtins)");
     fmt_step.dependOn(&b.addFmt(.{ .paths = fmt_paths }).step);
 
-    // `verify` is a superset of the ubuntu job in .github/workflows/ci.yml:
+    // `verify-full` is a superset of the ubuntu job in .github/workflows/ci.yml:
     // each ci.yml step calls one of these build steps, so CI and local runs share one definition.
-    const verify_step = b.step("verify", "Run everything the ubuntu CI job runs (fmt-check, lint, test, validation, bench smoke)");
+    // `verify` is the everyday subset: everything except compile-budget.
+    const verify_step = b.step("verify", "Run the ubuntu CI job's steps except compile-budget (fmt-check, lint, test, validation, bench smoke)");
     verify_step.dependOn(fmt_check_step);
     verify_step.dependOn(lint_step);
     verify_step.dependOn(test_step);
@@ -142,6 +155,12 @@ pub fn build(b: *std.Build) void {
     const run_bench_smoke = b.addRunArtifact(bench_exe);
     run_bench_smoke.addArg("--smoke");
     verify_step.dependOn(&run_bench_smoke.step);
+
+    // compile-budget measures a fresh cache on every run, so it never gets the
+    // warm-cache speedup the rest of verify gets, and adding it would double verify's time.
+    const verify_full_step = b.step("verify-full", "Run everything the ubuntu CI job runs (verify plus compile-budget)");
+    verify_full_step.dependOn(verify_step);
+    verify_full_step.dependOn(compile_budget_step);
 }
 
 /// `git show <rev>:<path>`, as a file.

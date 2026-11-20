@@ -32,9 +32,13 @@ jobs:
         run: zig build lint
       - name: Validation targets (T1-T9e)
         run: zig build validation
+      - name: Compile budget (fresh cache, 120 s limit; time is a measurement)
+        # shell: bash adds -o pipefail, so tee does not hide a failed compile-budget.
+        shell: bash
+        run: zig build compile-budget --summary all 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Benchmark harness (smoke)
         run: zig build bench -Dsmoke
-      # pin-guard needs a base revision, so it is the one step outside `zig build verify`.
+      # pin-guard needs a base revision, so it is the one step outside `zig build verify-full`.
       - name: Pin guard (golden-pin diff against the PR base)
         if: github.event_name == 'pull_request'
         run: zig build pin-guard -Dpin-base=origin/${{ github.base_ref }}
