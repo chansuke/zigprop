@@ -1,25 +1,30 @@
-//! zigprop-lint: token-level rules over src/ (verification pipeline plan §2-1 to §2-3).
+//! zigprop-lint: token-level rules over src/ and repository-level rules
+//! (verification pipeline plan §2-1 to §2-3, §2-5 ①).
 //!
-//! Usage: zigprop-lint [--warn] [--root <dir>]
-//!   --warn        report every rule as a warning and exit 0
-//!   --root <dir>  lint <dir>/src instead of ./src
+//! Usage: zigprop-lint [--warn] [--root <dir>] [--print-hashes]
+//!   --warn          report every rule as a warning and exit 0
+//!   --root <dir>    lint the repository at <dir> instead of . (its src, tests,
+//!                   build.zig, docs/verification.md and formal/manifest.zon)
+//!   --print-hashes  print the current formal/manifest.zon hashes first
 //!
 //! Rules and their configuration: core-is-pure, no-error-control-flow
-//! (error-contract.zon) and layer-order (layers.zon). Each rule's stage is
-//! in stages.zon.
+//! (error-contract.zon) and layer-order (layers.zon) walk src/ only;
+//! formal-drift (formal/manifest.zon) and evidence-integrity are in repo.zig.
+//! Each rule's stage is in stages.zon.
 
 const std = @import("std");
 const Token = std.zig.Token;
 const Allocator = std.mem.Allocator;
+const repo_rules = @import("repo.zig");
 
-pub const Rule = enum { @"core-is-pure", @"no-error-control-flow", @"layer-order" };
+pub const Rule = enum { @"core-is-pure", @"no-error-control-flow", @"layer-order", @"formal-drift", @"evidence-integrity" };
 pub const Stage = enum { warn, @"error" };
 
 const Entry = struct { name: []const u8, ref: []const u8 };
 const Contract = struct { comparable: []const Entry, returnable: []const Entry };
 const Upward = struct { from: []const u8, to: []const u8, in_fn: []const u8, ref: []const u8 };
 const Layers = struct { layers: []const []const u8, allowed_upward: []const Upward, external: []const []const u8 };
-const Stages = struct { @"core-is-pure": Stage, @"no-error-control-flow": Stage, @"layer-order": Stage };
+const Stages = struct { @"core-is-pure": Stage, @"no-error-control-flow": Stage, @"layer-order": Stage, @"formal-drift": Stage, @"evidence-integrity": Stage };
 
 pub const Config = struct { contract: Contract, layers: Layers };
 pub const default_config: Config = .{
@@ -119,6 +124,7 @@ const File = struct {
             .@"core-is-pure" => .{ pure_reason, pure_fix, pure_example },
             .@"no-error-control-flow" => .{ error_reason, error_fix, error_example },
             .@"layer-order" => .{ layer_reason, layer_fix, layer_example },
+            .@"formal-drift", .@"evidence-integrity" => unreachable, // repo.zig reports these
         };
         try f.out.append(f.arena, .{
             .rule = rule,
@@ -407,23 +413,128 @@ fn stageOf(rule: Rule, warn_all: bool) Stage {
     };
 }
 
+fn printViolation(path: []const u8, v: Violation, allow: []const u8) void {
+    std.debug.print(
+        \\[zigprop-lint/{s}] {s}:{d}:{d}
+        \\violation: {s}
+        \\reason:    {s}
+        \\fix:       {s}
+        \\example:   {s}
+        \\allow:     {s}
+        \\
+        \\
+    , .{ @tagName(v.rule), path, v.line, v.col, v.what, v.reason, v.fix, v.example, allow });
+}
+
+fn isHidden(rel: []const u8) bool {
+    var it = std.mem.splitScalar(u8, rel, '/');
+    while (it.next()) |part| if (part.len > 0 and part[0] == '.') return true;
+    return false;
+}
+
+fn lessPath(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn lessSource(_: void, a: repo_rules.SourceFile, b: repo_rules.SourceFile) bool {
+    return std.mem.lessThan(u8, a.path, b.path);
+}
+
+/// Adds every file and directory under `<root>/<sub>` to `paths` (as
+/// `<sub>/<rel>`, hidden components such as .lake and .zig-cache skipped)
+/// and, when `zig_files` is given, reads every .zig file into it. A
+/// missing `<sub>` adds nothing.
+fn walkTree(io: std.Io, arena: Allocator, root: []const u8, sub: []const u8, paths: *std.ArrayList([]const u8), zig_files: ?*std.ArrayList(repo_rules.SourceFile)) !void {
+    var dir = std.Io.Dir.cwd().openDir(io, try std.fs.path.join(arena, &.{ root, sub }), .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer dir.close(io);
+    var walker = try dir.walk(arena);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (isHidden(entry.path)) continue;
+        const rel = try std.fmt.allocPrint(arena, "{s}/{s}", .{ sub, entry.path });
+        try paths.append(arena, rel);
+        const files = zig_files orelse continue;
+        if (entry.kind != .file or !std.mem.endsWith(u8, rel, ".zig")) continue;
+        const src = try dir.readFileAllocOptions(io, entry.path, arena, .limited(1 << 24), .of(u8), 0);
+        try files.append(arena, .{ .path = rel, .src = src });
+    }
+}
+
+fn readRootFile(io: std.Io, arena: Allocator, root: []const u8, rel: []const u8) ![:0]const u8 {
+    const path = try std.fs.path.join(arena, &.{ root, rel });
+    return std.Io.Dir.cwd().readFileAllocOptions(io, path, arena, .limited(1 << 24), .of(u8), 0) catch |err| {
+        std.debug.print("zigprop-lint: cannot read {s}: {s}\n", .{ path, @errorName(err) });
+        std.process.exit(2);
+    };
+}
+
+/// Reads what the repository-level rules look at (repo.zig's `Repo`).
+fn readRepo(io: std.Io, arena: Allocator, root: []const u8) !repo_rules.Repo {
+    var paths: std.ArrayList([]const u8) = .empty;
+    var src_files: std.ArrayList(repo_rules.SourceFile) = .empty;
+    var test_files: std.ArrayList(repo_rules.SourceFile) = .empty;
+    try walkTree(io, arena, root, "src", &paths, &src_files);
+    try walkTree(io, arena, root, "tests", &paths, &test_files);
+    for ([_][]const u8{ "formal", "bench", "docs" }) |sub| try walkTree(io, arena, root, sub, &paths, null);
+    std.mem.sort([]const u8, paths.items, {}, lessPath);
+    std.mem.sort(repo_rules.SourceFile, src_files.items, {}, lessSource);
+    std.mem.sort(repo_rules.SourceFile, test_files.items, {}, lessSource);
+
+    const manifest_text = try readRootFile(io, arena, root, "formal/manifest.zon");
+    var diag: std.zon.parse.Diagnostics = .{ .errors = &.{} };
+    const manifest = std.zon.parse.fromSlice([]const repo_rules.ManifestItem, .{
+        .source = manifest_text,
+        .gpa = arena,
+        .arena = arena,
+        .diagnostics = &diag,
+    }) catch |err| {
+        std.debug.print("zigprop-lint: formal/manifest.zon does not parse ({s}); its shape is repo.zig's `[]const ManifestItem`.\n", .{@errorName(err)});
+        std.process.exit(2);
+    };
+    return .{
+        .build_zig = try readRootFile(io, arena, root, "build.zig"),
+        .verification_md = try readRootFile(io, arena, root, "docs/verification.md"),
+        .manifest_text = manifest_text,
+        .manifest = manifest,
+        .src_files = src_files.items,
+        .test_files = test_files.items,
+        .paths = paths.items,
+    };
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     var warn_all = false;
+    var print_hashes = false;
     var root: []const u8 = ".";
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--warn")) {
             warn_all = true;
+        } else if (std.mem.eql(u8, args[i], "--print-hashes")) {
+            print_hashes = true;
         } else if (std.mem.eql(u8, args[i], "--root") and i + 1 < args.len) {
             i += 1;
             root = args[i];
         } else {
-            std.debug.print("zigprop-lint: unknown argument `{s}`\nusage: zigprop-lint [--warn] [--root <dir>]\n", .{args[i]});
+            std.debug.print("zigprop-lint: unknown argument `{s}`\nusage: zigprop-lint [--warn] [--root <dir>] [--print-hashes]\n", .{args[i]});
             std.process.exit(2);
         }
+    }
+
+    const repo = try readRepo(io, arena, root);
+    if (print_hashes) {
+        // Not a rule: the current hash of each manifest entry, to paste into
+        // formal/manifest.zon after option (a) or (b) of formal-drift's fix.
+        for (repo.manifest) |item| switch (try repo_rules.hashItem(arena, repo.src_files, item)) {
+            .hash => |h| std.debug.print("{s}: .hash = 0x{x:0>16},\n", .{ item.artifact, h }),
+            .missing, .ambiguous => |m| std.debug.print("{s}: no hash ({s})\n", .{ item.artifact, m }),
+        };
     }
 
     var src_dir = try std.Io.Dir.cwd().openDir(io, try std.fs.path.join(arena, &.{ root, "src" }), .{ .iterate = true });
@@ -449,27 +560,38 @@ pub fn main(init: std.process.Init) !void {
         for (try lintSource(arena, path, src, default_config)) |v| {
             counts.getPtr(v.rule).* += 1;
             if (stageOf(v.rule, warn_all) == .@"error") errors += 1;
-            std.debug.print(
-                \\[zigprop-lint/{s}] {s}:{d}:{d}
-                \\violation: {s}
-                \\reason:    {s}
-                \\fix:       {s}
-                \\example:   {s}
-                \\allow:     `// zigprop-lint: allow({s}) <reason>` on the line above (the reason is required; an allow without one is itself a violation).
-                \\
-                \\
-            , .{ @tagName(v.rule), path, v.line, v.col, v.what, v.reason, v.fix, v.example, @tagName(v.rule) });
+            printViolation(path, v, try std.fmt.allocPrint(arena, "`// zigprop-lint: allow({s}) <reason>` on the line above (the reason is required; an allow without one is itself a violation).", .{@tagName(v.rule)}));
         }
     }
+    var config_errors: usize = 0;
+    var check_counts = std.EnumArray(repo_rules.Check, usize).initFill(0);
+    for (try repo_rules.lintRepo(arena, repo)) |l| {
+        counts.getPtr(l.v.rule).* += 1;
+        if (repo_rules.checkOf(l.v)) |c| check_counts.getPtr(c).* += 1;
+        if (l.config_error) {
+            config_errors += 1;
+        } else if (stageOf(l.v.rule, warn_all) == .@"error") errors += 1;
+        printViolation(l.path, l.v, "not available: a repository-level rule has no allow comment; fix the file, or change the rule's stage in tools/lint/stages.zon (director's decision).");
+    }
+    if (config_errors > 0) std.debug.print("zigprop-lint: {d} manifest error(s) (fail whatever the stage)\n", .{config_errors});
+    errors += config_errors;
     std.debug.print("zigprop-lint: {d} files;", .{paths.items.len});
     for (std.enums.values(Rule)) |r| std.debug.print(" {s} {d} ({s});", .{ @tagName(r), counts.get(r), @tagName(stageOf(r, warn_all)) });
     std.debug.print(" {d} error(s)\n", .{errors});
+    std.debug.print("zigprop-lint: evidence-integrity by check:", .{});
+    for (std.enums.values(repo_rules.Check)) |c| std.debug.print(" {d} {s} {d};", .{ @backingInt(c), @tagName(c), check_counts.get(c) });
+    std.debug.print("\n", .{});
     if (errors > 0) std.process.exit(1);
 }
 
 // ---------------------------------------------------------------------
 // Tests: each rule detects its violation, passes clean code, and honours
-// (or rejects) allow comments.
+// (or rejects) allow comments. repo.zig's tests cover formal-drift and
+// evidence-integrity.
+
+test {
+    _ = repo_rules;
+}
 
 fn expectRules(expected: []const Rule, path: []const u8, src: [:0]const u8) !void {
     try expectRulesWith(expected, path, src, default_config);

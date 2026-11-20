@@ -5,4 +5,6 @@
     .@"core-is-pure" = .@"error",
     .@"no-error-control-flow" = .warn,
     .@"layer-order" = .warn,
+    .@"formal-drift" = .warn,
+    .@"evidence-integrity" = .warn,
 }

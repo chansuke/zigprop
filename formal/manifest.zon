@@ -1,0 +1,44 @@
+// Formal artifacts and the implementation functions each one models
+// (verification pipeline plan §2-5 ①). `hash` is the FNV-1a 64 hash of
+// the listed functions' tokens, `fn` to closing brace, comments, doc
+// comments and whitespace excluded, in the order listed. The lint rule
+// formal-drift reports an entry whose functions no longer hash to it;
+// `zig build lint -Dlint-print-hashes` prints the current values.
+// `checked_against` says what the artifact was actually checked against,
+// so that a matching hash is not read as "the artifact verifies this code".
+.{
+    .{
+        .artifact = "formal/lean/ZigpropFormal/Normalize.lean",
+        .impl = .{.{ .file = "src/source.zig", .func = "draw" }},
+        .hash = 0x206a3c2320106aa8,
+        .checked_against = "design v2 (§2, MF1): `normalize` over Nat models the replay rule in Source.draw's .replay branch (bound 0 verbatim, else raw % bound). The Lean header names Source.range, which now only calls draw (and `range` is declared twice in src/source.zig). The u64 bridge is not proved; not re-checked against v2.1 or v0.3.",
+    },
+    .{
+        .artifact = "formal/lean/ZigpropFormal/Zigzag.lean",
+        .impl = .{
+            .{ .file = "src/gen.zig", .func = "rankToValue" },
+            .{ .file = "src/gen.zig", .func = "valueToRank" },
+        },
+        .hash = 0x6e7d3e0d952d1a55,
+        .checked_against = "design v2 (§4.1): zigzagEncode/zigzagDecode over Int/Nat model the signed-integer rank map in rankToValue (decode) and valueToRank (encode). The fit to finite integer types is not proved; float ranks (floatRankToValue) are a different encoding and not modelled; not re-checked against v0.3.",
+    },
+    .{
+        .artifact = "formal/lean/ZigpropFormal/Shortlex.lean",
+        .impl = .{
+            .{ .file = "src/shrink.zig", .func = "keyShortlexLess" },
+            .{ .file = "src/shrink.zig", .func = "tryAccept" },
+            .{ .file = "src/shrink.zig", .func = "tryRatchet" },
+        },
+        .hash = 0xdf3eeeff5e2b32e5,
+        .checked_against = "design v2 (pre-v2.1): shortlex as a strict order on List Nat values. The implementation compares skip-filtered u64 key sequences (v2.1, keyShortlexLess via tryAccept), and tryRatchet's key-equal lateral move has no Lean counterpart; neither is modelled, and the artifact was not re-checked against v2.1 or v0.3.",
+    },
+    .{
+        .artifact = "formal/tla/ZigpropRunner.tla",
+        .impl = .{
+            .{ .file = "src/runner.zig", .func = "checkWith" },
+            .{ .file = "src/shrink.zig", .func = "shrinkWith" },
+        },
+        .hash = 0x904fdfe396446c2f,
+        .checked_against = "design v2 (§5-§7) + one v0.3 header note: a finite rank abstraction of the runner/shrink protocol, not a refinement of the implementation; P4's lateral move is unmodelled. shrinkWith's hash covers every pass, since they are nested in its body.",
+    },
+}

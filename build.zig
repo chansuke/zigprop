@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) void {
     const bench_bin_step = b.step("bench-bin", "Install the benchmark binary");
     bench_bin_step.dependOn(&b.addInstallArtifact(bench_exe, .{}).step);
 
-    // Custom lint over src/ (tools/lint): `zig build lint [-Dlint-warn]`.
+    // Custom lint (tools/lint): `zig build lint [-Dlint-warn] [-Dlint-print-hashes]`.
     const lint_mod = b.createModule(.{
         .root_source_file = b.path("tools/lint/main.zig"),
         .target = b.graph.host,
@@ -86,7 +86,9 @@ pub fn build(b: *std.Build) void {
     run_lint.setCwd(b.path("."));
     if (b.option(bool, "lint-warn", "Report lint violations without failing") orelse false)
         run_lint.addArg("--warn");
-    if (b.option([]const u8, "lint-root", "Lint <dir>/src instead of ./src")) |dir|
+    if (b.option(bool, "lint-print-hashes", "Print the current formal/manifest.zon hashes") orelse false)
+        run_lint.addArg("--print-hashes");
+    if (b.option([]const u8, "lint-root", "Lint the repository at <dir> (src, tests, build.zig, docs, formal) instead of .")) |dir|
         run_lint.addArgs(&.{ "--root", dir });
     const lint_step = b.step("lint", "Run zigprop's custom lint rules (tools/lint)");
     lint_step.dependOn(&run_lint.step);
