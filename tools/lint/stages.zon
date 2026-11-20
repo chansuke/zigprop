@@ -3,8 +3,8 @@
 // `zig build lint -Dlint-warn` reports every rule as a warning.
 .{
     .@"core-is-pure" = .@"error",
-    .@"no-error-control-flow" = .warn,
-    .@"layer-order" = .warn,
+    .@"no-error-control-flow" = .@"error",
+    .@"layer-order" = .@"error",
     .@"formal-drift" = .warn,
     .@"evidence-integrity" = .warn,
 }
