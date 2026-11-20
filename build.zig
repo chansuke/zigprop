@@ -37,6 +37,26 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(extra_tests).step);
     }
 
+    // Allocation failure at every point (tests/oom.zig): two cases in
+    // `zig build test`, every case in `zig build oom-full` (nightly).
+    const oom_full_step = b.step("oom-full", "Run tests/oom.zig over every type and entry point (not part of verify)");
+    for ([_]bool{ false, true }) |full| {
+        const oom_options = b.addOptions();
+        oom_options.addOption(bool, "full", full);
+        const oom_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/oom.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zigprop", .module = mod },
+                    .{ .name = "oom_options", .module = oom_options.createModule() },
+                },
+            }),
+        });
+        (if (full) oom_full_step else test_step).dependOn(&b.addRunArtifact(oom_tests).step);
+    }
+
     // Benchmark / profiling harness (bench/main.zig). Both the harness
     // and the library module it measures are ReleaseFast, regardless of
     // the global -Doptimize setting.
@@ -65,7 +85,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const validation_step = b.step("validation", "Run the pre-registered validation targets T1-T9e");
-    validation_step.dependOn(&b.addRunArtifact(validation_exe).step);
+    const run_validation = b.addRunArtifact(validation_exe);
+    // Amendment A3 sweep (design v0.3): `zig build validation -Dseeds=10..109`.
+    if (b.option([]const u8, "seeds", "Validation seed range <from>..<to>, inclusive (default 0..9, the gated range)")) |range|
+        run_validation.addArgs(&.{ "--seeds", range });
+    validation_step.dependOn(&run_validation.step);
 
     const bench_step = b.step("bench", "Run benchmarks");
     const run_bench = b.addRunArtifact(bench_exe);

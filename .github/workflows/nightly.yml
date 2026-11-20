@@ -1,0 +1,91 @@
+name: Nightly
+
+# Measurements that are too slow or too noisy for every push: the
+# pre-registered validation sweep (design v0.3 Amendment A3), the full
+# OOM brute force, zig master, and the compile-budget time.
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # 03:17 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: validation sweep (seeds 10..109, Amendment A3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.17.1
+      - name: Validation sweep (a measurement, not a gate)
+        # shell: bash adds -o pipefail, so tee does not hide a failed run.
+        shell: bash
+        run: |
+          set -euo pipefail
+          zig build validation -Dseeds=10..109 2>&1 | tee sweep.txt
+          {
+            echo '```'
+            grep -E '^(== A3 sweep|T[0-9].*\([0-9]+\.[0-9]%\)$|controls|sweep-below-threshold:)' sweep.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Open an issue if a ratio is below 80%
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          line=$(grep '^sweep-below-threshold:' sweep.txt)
+          if [ "$line" != "sweep-below-threshold: none" ]; then
+            body=$(printf '%s\n\nRun: %s/%s/actions/runs/%s (design v0.3 Amendment A3)\n' \
+              "$line" "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}")
+            gh issue create --repo "${{ github.repository }}" \
+              --title "Nightly validation sweep below 80% ($(date -u +%Y-%m-%d))" \
+              --body "$body"
+          fi
+
+  oom-full:
+    name: OOM brute force (every case)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.17.1
+      - name: zig build oom-full
+        run: zig build oom-full --summary all
+
+  zig-master:
+    name: verify-full on zig master (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: master
+      - name: zig build verify-full
+        run: zig build verify-full --summary all
+
+  compile-budget:
+    name: compile-budget time (a measurement)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.17.1
+      - name: Compile budget (fresh cache, 120 s limit)
+        # shell: bash adds -o pipefail, so tee does not hide a failed compile-budget.
+        shell: bash
+        run: zig build compile-budget --summary all 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"

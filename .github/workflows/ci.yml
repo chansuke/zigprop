@@ -59,6 +59,19 @@ jobs:
       - name: Tests on master
         run: zig build test --summary all
 
+  test-32bit:
+    name: test (x86-linux, 32-bit usize, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.17.1
+      - name: Unit and meta tests (x86-linux)
+        run: zig build test -Dtarget=x86-linux --summary all
+
   macos:
     name: test (macOS, zig 0.17.1)
     runs-on: macos-latest

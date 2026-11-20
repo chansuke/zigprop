@@ -505,9 +505,9 @@ fn countP4(comptime T: type, arena: std.mem.Allocator, property: *const fn (T) b
 /// T5-F (measurement only): f64 over seeds 0..9 x attempts 0..199;
 /// the share with an unbiased exponent in [-20, 20] and non-zero low
 /// 20 mantissa bits.
-fn t5fOrdinary(allocator: std.mem.Allocator) !usize {
+fn t5fOrdinary(allocator: std.mem.Allocator, seeds: Seeds) !usize {
     var hits: usize = 0;
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         for (0..200) |attempt| {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
@@ -821,9 +821,61 @@ fn replayRuns(allocator: std.mem.Allocator, choices: []const zigprop.Choice) ![]
 
 // ---------------------------------------------------------------------
 
+/// The inclusive seed range every target runs (`--seeds <from>..<to>`).
+/// The default, 0..9, is the range §8.3 registers the gates for; any
+/// other range is the Amendment A3 sweep: no gate verdicts, a success
+/// ratio per target and one `sweep-below-threshold:` line.
+const Seeds = struct {
+    from: usize = 0,
+    to: usize = 9,
+
+    fn count(s: Seeds) usize {
+        return s.to - s.from + 1;
+    }
+
+    fn isDefault(s: Seeds) bool {
+        return s.from == 0 and s.to == 9;
+    }
+};
+
+fn parseSeeds(arena: std.mem.Allocator, init: std.process.Init) !Seeds {
+    const args = try init.minimal.args.toSlice(arena);
+    var seeds: Seeds = .{};
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const ok = std.mem.eql(u8, args[i], "--seeds") and i + 1 < args.len and blk: {
+            i += 1;
+            const dots = std.mem.indexOf(u8, args[i], "..") orelse break :blk false;
+            seeds.from = std.fmt.parseInt(usize, args[i][0..dots], 10) catch break :blk false;
+            seeds.to = std.fmt.parseInt(usize, args[i][dots + 2 ..], 10) catch break :blk false;
+            break :blk seeds.from <= seeds.to;
+        };
+        if (!ok) {
+            std.debug.print("validation: bad argument `{s}`\nusage: zigprop-validation [--seeds <from>..<to>]  (inclusive, default 0..9)\n", .{args[i]});
+            std.process.exit(2);
+        }
+    }
+    return seeds;
+}
+
+/// One A3 sweep ratio: the target's primary success count over N.
+const SweepLine = struct { label: []const u8, ok: usize };
+
+fn belowThreshold(ok: usize, n: usize) bool {
+    return ok * 100 < 80 * n;
+}
+
+fn printRatio(label: []const u8, ok: usize, n: usize) void {
+    const tenths = ok * 1000 / n;
+    std.debug.print("{s}: {d}/{d} ({d}.{d}%)\n", .{ label, ok, n, tenths / 10, tenths % 10 });
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const out = std.debug;
+    const seeds = try parseSeeds(init.arena.allocator(), init);
+    const n = seeds.count();
+    const sweep = !seeds.isDefault();
 
     // ---------------- T1 ----------------
     out.print("\n== T1 varint (mutant: decoder truncated at 4 bytes) ==\n", .{});
@@ -831,7 +883,7 @@ pub fn main(init: std.process.Init) !void {
     var t1_discovered: usize = 0;
     var t1_exact: usize = 0;
     var t1_control_ok: usize = 0;
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         var report = try zigprop.check(allocator, u32, propVarintMutant, .{ .seed = seed, .max_cases = 200 });
         defer report.deinit();
         var hand_prng = std.Random.DefaultPrng.init(seed);
@@ -863,8 +915,8 @@ pub fn main(init: std.process.Init) !void {
         defer control.deinit();
         if (std.meta.activeTag(control) == .passed) t1_control_ok += 1;
     }
-    out.print("T1: discovered {d}/10, exact 2^28 {d}/10, control passed {d}/10\n", .{ t1_discovered, t1_exact, t1_control_ok });
-    out.print("T1 criterion (>=8 discovered AND >=8 exact): {s}\n", .{
+    out.print("T1: discovered {d}/{d}, exact 2^28 {d}/{d}, control passed {d}/{d}\n", .{ t1_discovered, n, t1_exact, n, t1_control_ok, n });
+    if (!sweep) out.print("T1 criterion (>=8 discovered AND >=8 exact): {s}\n", .{
         if (t1_discovered >= 8 and t1_exact >= 8) "MET" else "NOT MET",
     });
 
@@ -874,7 +926,7 @@ pub fn main(init: std.process.Init) !void {
     var t2_discovered: usize = 0;
     var t2_exact: usize = 0;
     var t2_control_ok: usize = 0;
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         var report = try zigprop.checkCustom(allocator, []const Run, genRuns, propRleMutant, .{ .seed = seed, .max_cases = 200 });
         defer report.deinit();
         var hand_prng = std.Random.DefaultPrng.init(seed);
@@ -884,15 +936,15 @@ pub fn main(init: std.process.Init) !void {
         for (1..201) |i| {
             _ = i;
             var runs_buf: [max_runs]Run = undefined;
-            const n = 1 + hand_rand.intRangeLessThan(usize, 0, max_runs);
-            for (runs_buf[0..n]) |*r| {
+            const n_runs = 1 + hand_rand.intRangeLessThan(usize, 0, max_runs);
+            for (runs_buf[0..n_runs]) |*r| {
                 r.* = .{
                     .value = hand_rand.int(u8),
                     .len = 200 + hand_rand.intRangeLessThan(u32, 0, 101),
                 };
             }
-            if (!propRleMutant(runs_buf[0..n])) {
-                hand_desc = try std.fmt.bufPrint(&hand_buf, "{d} run(s), first len {d}", .{ n, runs_buf[0].len });
+            if (!propRleMutant(runs_buf[0..n_runs])) {
+                hand_desc = try std.fmt.bufPrint(&hand_buf, "{d} run(s), first len {d}", .{ n_runs, runs_buf[0].len });
                 break;
             }
         }
@@ -915,8 +967,8 @@ pub fn main(init: std.process.Init) !void {
         defer control.deinit();
         if (std.meta.activeTag(control) == .passed) t2_control_ok += 1;
     }
-    out.print("T2: discovered {d}/10, exact single-run-256 {d}/10, control passed {d}/10\n", .{ t2_discovered, t2_exact, t2_control_ok });
-    out.print("T2 criterion (>=8 discovered AND >=8 exact): {s}\n", .{
+    out.print("T2: discovered {d}/{d}, exact single-run-256 {d}/{d}, control passed {d}/{d}\n", .{ t2_discovered, n, t2_exact, n, t2_control_ok, n });
+    if (!sweep) out.print("T2 criterion (>=8 discovered AND >=8 exact): {s}\n", .{
         if (t2_discovered >= 8 and t2_exact >= 8) "MET" else "NOT MET",
     });
 
@@ -927,7 +979,7 @@ pub fn main(init: std.process.Init) !void {
     var t3_subnormal: usize = 0;
     var t3_exact: usize = 0;
     var t3_control_ok: usize = 0;
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         var report = try zigprop.check(allocator, f32, propF32Mutant, .{ .seed = seed, .max_cases = 200 });
         defer report.deinit();
         var hand_prng = std.Random.DefaultPrng.init(seed);
@@ -965,8 +1017,8 @@ pub fn main(init: std.process.Init) !void {
         defer control.deinit();
         if (std.meta.activeTag(control) == .passed) t3_control_ok += 1;
     }
-    out.print("T3: discovered {d}/10, subnormal {d}/10, exact rank-2 {d}/10, control passed {d}/10\n", .{ t3_discovered, t3_subnormal, t3_exact, t3_control_ok });
-    out.print("T3 criterion (gate: >=8 discovered AND >=8 subnormal; exact reported): {s}\n", .{
+    out.print("T3: discovered {d}/{d}, subnormal {d}/{d}, exact rank-2 {d}/{d}, control passed {d}/{d}\n", .{ t3_discovered, n, t3_subnormal, n, t3_exact, n, t3_control_ok, n });
+    if (!sweep) out.print("T3 criterion (gate: >=8 discovered AND >=8 subnormal; exact reported): {s}\n", .{
         if (t3_discovered >= 8 and t3_subnormal >= 8) "MET" else "NOT MET",
     });
 
@@ -977,9 +1029,12 @@ pub fn main(init: std.process.Init) !void {
     var t4_exact: usize = 0;
     var t4_control_ok: usize = 0;
     // Kept for T9's gate (2): per-seed shrunk choices identical to T4's.
-    var t4_shrunk: [10]?[]zigprop.Choice = @splat(null);
+    // Indexed by seed - seeds.from.
+    const t4_shrunk = try allocator.alloc(?[]zigprop.Choice, n);
+    @memset(t4_shrunk, null);
+    defer allocator.free(t4_shrunk);
     defer for (t4_shrunk) |s| if (s) |c| allocator.free(c);
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         var report = try zigprop.check(allocator, Value, propValueMutant, .{ .seed = seed, .max_cases = 200 });
         defer report.deinit();
         // Hand loop: raw generation without shrinking, same budget.
@@ -1002,7 +1057,7 @@ pub fn main(init: std.process.Init) !void {
         switch (report) {
             .failed => |f| {
                 t4_discovered += 1;
-                t4_shrunk[seed] = try allocator.dupe(zigprop.Choice, f.shrunk_choices);
+                t4_shrunk[seed - seeds.from] = try allocator.dupe(zigprop.Choice, f.shrunk_choices);
                 var arena = std.heap.ArenaAllocator.init(allocator);
                 defer arena.deinit();
                 const shrunk = try replayValue(arena.allocator(), f.shrunk_choices);
@@ -1019,16 +1074,17 @@ pub fn main(init: std.process.Init) !void {
         defer control.deinit();
         if (std.meta.activeTag(control) == .passed) t4_control_ok += 1;
     }
-    out.print("T4: discovered {d}/10, exact list[int 0 x3] {d}/10, control passed {d}/10\n", .{ t4_discovered, t4_exact, t4_control_ok });
-    out.print("T4 criterion (>=8 discovered AND >=8 exact): {s}\n", .{
+    out.print("T4: discovered {d}/{d}, exact list[int 0 x3] {d}/{d}, control passed {d}/{d}\n", .{ t4_discovered, n, t4_exact, n, t4_control_ok, n });
+    if (!sweep) out.print("T4 criterion (>=8 discovered AND >=8 exact): {s}\n", .{
         if (t4_discovered >= 8 and t4_exact >= 8) "MET" else "NOT MET",
     });
 
     // ---------------- T5 / T5s ----------------
-    inline for (.{
+    var t5_minimal: [2]usize = .{ 0, 0 }; // T5, T5s (for the sweep ratios)
+    inline for (0.., .{
         .{ "T5", "u64 LEB128", u64, propT5Mutant, propT5Correct, @as(i128, 1 << 21) },
         .{ "T5s", "i64 zigzag LEB128", i64, propT5sMutant, propT5sCorrect, @as(i128, 1 << 20) },
-    }) |t| {
+    }) |ti, t| {
         out.print("\n== {s} mid-range varint, {s} (mutant: 4th byte of a 4-byte encoding ignored) ==\n", .{ t[0], t[1] });
         out.print("seed | cases, shrunk value, evals, P4 acceptances\n", .{});
         var found: usize = 0;
@@ -1036,7 +1092,7 @@ pub fn main(init: std.process.Init) !void {
         var ctl: usize = 0;
         var evals_total: usize = 0;
         var p4_total: usize = 0;
-        for (0..10) |seed| {
+        for (seeds.from..seeds.to + 1) |seed| {
             var r = try zigprop.check(allocator, t[2], t[3], .{ .seed = seed, .max_cases = 200 });
             defer r.deinit();
             switch (r) {
@@ -1058,15 +1114,16 @@ pub fn main(init: std.process.Init) !void {
             defer c.deinit();
             if (std.meta.activeTag(c) == .passed) ctl += 1;
         }
-        out.print("{s}: discovered {d}/10, minimal {d} {d}/10, control passed {d}/10\n", .{ t[0], found, t[5], minimal, ctl });
+        t5_minimal[ti] = minimal;
+        out.print("{s}: discovered {d}/{d}, minimal {d} {d}/{d}, control passed {d}/{d}\n", .{ t[0], found, n, t[5], minimal, n, ctl, n });
         out.print("{s} measurements: total evals {d}, total P4 acceptances {d}; v0.2.1 (M0-e): found 0/10\n", .{ t[0], evals_total, p4_total });
-        out.print("{s} criterion (>=8 discovered AND >=8 minimal, control 10/10): {s}\n", .{ t[0], if (found >= 8 and minimal >= 8 and ctl == 10) "MET" else "NOT MET" });
+        if (!sweep) out.print("{s} criterion (>=8 discovered AND >=8 minimal, control 10/10): {s}\n", .{ t[0], if (found >= 8 and minimal >= 8 and ctl == 10) "MET" else "NOT MET" });
     }
 
     // ---------------- T5-F ----------------
-    const t5f = try t5fOrdinary(allocator);
+    const t5f = try t5fOrdinary(allocator, seeds);
     out.print("\n== T5-F ordinary f64 values (measurement only) ==\n", .{});
-    out.print("T5-F: v0.3 {d}/2000 with exponent in [-20, 20] and non-zero low 20 mantissa bits; v0.2.1: 8/2000 (scratch run, M6)\n", .{t5f});
+    out.print("T5-F: v0.3 {d}/{d} with exponent in [-20, 20] and non-zero low 20 mantissa bits; v0.2.1: 8/2000 (scratch run, M6)\n", .{ t5f, n * 200 });
 
     // ---------------- T6 ----------------
     out.print("\n== T6 tree subtree promotion (mutant: a node with value 7 is miscounted) ==\n", .{});
@@ -1078,7 +1135,7 @@ pub fn main(init: std.process.Init) !void {
     var t6_exhausted: usize = 0;
     var t6_p6off_min: usize = 0;
     var t6_evals_total: usize = 0;
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         var r = try zigprop.check(allocator, Tree, propT6Mutant, .{ .seed = seed, .max_cases = 200, .limits = t6_limits });
         defer r.deinit();
         switch (r) {
@@ -1110,9 +1167,9 @@ pub fn main(init: std.process.Init) !void {
         defer c.deinit();
         if (std.meta.activeTag(c) == .passed) t6_ctl += 1;
     }
-    out.print("T6: discovered {d}/10, minimal {{7,[]}} {d}/10, control passed {d}/10\n", .{ t6_found, t6_min, t6_ctl });
+    out.print("T6: discovered {d}/{d}, minimal {{7,[]}} {d}/{d}, control passed {d}/{d}\n", .{ t6_found, n, t6_min, n, t6_ctl, n });
     out.print("T6 measurements: original root=7 {d}, budget exhausted {d}, total evals {d}; P6 off minimal {d}/{d}; v0.2.1 (M0-e): found 10/10, minimal 0/10\n", .{ t6_root7, t6_exhausted, t6_evals_total, t6_p6off_min, t6_found });
-    out.print("T6 criterion (>=8 discovered AND >=8 minimal, control 10/10): {s}\n", .{
+    if (!sweep) out.print("T6 criterion (>=8 discovered AND >=8 minimal, control 10/10): {s}\n", .{
         if (t6_found >= 8 and t6_min >= 8 and t6_ctl == 10) "MET" else "NOT MET",
     });
 
@@ -1126,7 +1183,7 @@ pub fn main(init: std.process.Init) !void {
     var t7_exhausted: usize = 0;
     var t7_p5off_min: usize = 0;
     var t7_evals_total: usize = 0;
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         var r = try zigprop.check(allocator, []const u8, propT7Mutant, .{ .seed = seed, .max_cases = 200 });
         defer r.deinit();
         switch (r) {
@@ -1157,9 +1214,9 @@ pub fn main(init: std.process.Init) !void {
         defer c.deinit();
         if (std.meta.activeTag(c) == .passed) t7_ctl += 1;
     }
-    out.print("T7: discovered {d}/10, minimal [7] {d}/10, control passed {d}/10\n", .{ t7_found, t7_min, t7_ctl });
+    out.print("T7: discovered {d}/{d}, minimal [7] {d}/{d}, control passed {d}/{d}\n", .{ t7_found, n, t7_min, n, t7_ctl, n });
     out.print("T7 measurements: original first=7 {d}, budget exhausted {d}, total evals {d}; P5 off minimal {d}/{d}; v0.2.1 (M0-e): found 10/10, minimal 8/10\n", .{ t7_first7, t7_exhausted, t7_evals_total, t7_p5off_min, t7_found });
-    out.print("T7 criterion (>=8 discovered AND >=8 minimal [7], control 10/10): {s}\n", .{
+    if (!sweep) out.print("T7 criterion (>=8 discovered AND >=8 minimal [7], control 10/10): {s}\n", .{
         if (t7_found >= 8 and t7_min >= 8 and t7_ctl == 10) "MET" else "NOT MET",
     });
 
@@ -1174,7 +1231,7 @@ pub fn main(init: std.process.Init) !void {
     var t9_ctl_leaks: usize = 0;
     const truncating: Codec = .{ .mode = .truncate };
     const correct: Codec = .{ .mode = .correct };
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
         {
             const gpa = dbg.allocator();
@@ -1188,7 +1245,7 @@ pub fn main(init: std.process.Init) !void {
                     const shrunk = try replayValue(arena.allocator(), f.shrunk_choices);
                     const exact = isExpectedT4Minimum(shrunk);
                     if (exact) t9_exact += 1;
-                    const same = if (t4_shrunk[seed]) |c| std.mem.eql(u8, std.mem.sliceAsBytes(c), std.mem.sliceAsBytes(f.shrunk_choices)) else false;
+                    const same = if (t4_shrunk[seed - seeds.from]) |c| std.mem.eql(u8, std.mem.sliceAsBytes(c), std.mem.sliceAsBytes(f.shrunk_choices)) else false;
                     if (same) t9_same += 1;
                     out.print("{d:>4} | cases {d}, shrunk {s}, evals {d}, same as T4: {}\n", .{
                         seed, f.origin.random.attempt_index + 1, if (exact) "list[int 0, int 0, int 0] (exact)" else "other shape", f.shrink_evaluations, same,
@@ -1207,8 +1264,8 @@ pub fn main(init: std.process.Init) !void {
         }
         if (dbg_c.deinit() == .leak) t9_ctl_leaks += 1;
     }
-    out.print("T9: discovered {d}/10, exact list[int 0 x3] {d}/10, shrunk choices identical to T4 {d}/{d}, leaking seeds {d}, control passed {d}/10 (leaking seeds {d}); container-level T9 buffers: none (code review)\n", .{ t9_found, t9_exact, t9_same, t4_discovered, t9_leaks, t9_ctl, t9_ctl_leaks });
-    out.print("T9 criterion (>=8 discovered AND >=8 exact AND identical to T4 on every seed AND 0 leaks, control 10/10): {s}\n", .{
+    out.print("T9: discovered {d}/{d}, exact list[int 0 x3] {d}/{d}, shrunk choices identical to T4 {d}/{d}, leaking seeds {d}, control passed {d}/{d} (leaking seeds {d}); container-level T9 buffers: none (code review)\n", .{ t9_found, n, t9_exact, n, t9_same, t4_discovered, t9_leaks, t9_ctl, n, t9_ctl_leaks });
+    if (!sweep) out.print("T9 criterion (>=8 discovered AND >=8 exact AND identical to T4 on every seed AND 0 leaks, control 10/10): {s}\n", .{
         if (t9_found >= 8 and t9_exact >= 8 and t9_same == t4_discovered and t9_found == t4_discovered and t9_leaks == 0 and t9_ctl == 10 and t9_ctl_leaks == 0) "MET" else "NOT MET",
     });
 
@@ -1223,7 +1280,7 @@ pub fn main(init: std.process.Init) !void {
     var t9e_leaks: usize = 0;
     const rejecting: Codec = .{ .mode = .reject };
     const expected_failure: zigprop.Failure = .{ .returned_error = error.UnexpectedLength };
-    for (0..10) |seed| {
+    for (seeds.from..seeds.to + 1) |seed| {
         var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
         {
             const gpa = dbg.allocator();
@@ -1270,8 +1327,8 @@ pub fn main(init: std.process.Init) !void {
         }
         if (dbg.deinit() == .leak) t9e_leaks += 1;
     }
-    out.print("T9e: discovered {d}/10, failure = returned_error(UnexpectedLength) {d}/{d}, kind kept on {d} acceptances with {d} violations, exact list[int 0 x3] {d}/10 (measurement), leaking seeds {d}; control: T9's correct codec\n", .{ t9e_found, t9e_kind, t9e_found, t9e_accepts, t9e_violations, t9e_exact, t9e_leaks });
-    out.print("T9e criterion (>=8 discovered AND kind reported on every discovery AND 0 kind violations AND 0 leaks): {s}\n", .{
+    out.print("T9e: discovered {d}/{d}, failure = returned_error(UnexpectedLength) {d}/{d}, kind kept on {d} acceptances with {d} violations, exact list[int 0 x3] {d}/{d} (measurement), leaking seeds {d}; control: T9's correct codec\n", .{ t9e_found, n, t9e_kind, t9e_found, t9e_accepts, t9e_violations, t9e_exact, n, t9e_leaks });
+    if (!sweep) out.print("T9e criterion (>=8 discovered AND kind reported on every discovery AND 0 kind violations AND 0 leaks): {s}\n", .{
         if (t9e_found >= 8 and t9e_kind == t9e_found and t9e_violations == 0 and t9e_leaks == 0) "MET" else "NOT MET",
     });
 
@@ -1305,7 +1362,7 @@ pub fn main(init: std.process.Init) !void {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
         const a = arena_state.allocator();
-        for (0..10) |seed| {
+        for (seeds.from..seeds.to + 1) |seed| {
             const cfg: zigprop.Config = .{ .seed = seed, .max_cases = 200 };
             var r1 = try zigprop.check(allocator, u32, propVarintMutant, cfg);
             defer r1.deinit();
@@ -1393,12 +1450,50 @@ pub fn main(init: std.process.Init) !void {
             std.debug.assert(row == rows.len);
         }
     }
-    var t8_all = t8_sources_found == 10;
+    var t8_all = t8_sources_found == n;
     for (rows) |r| {
-        const met = r.total == 10 and r.ok == 10;
+        const met = r.total == n and r.ok == n;
         if (!met) t8_all = false;
         out.print("  {s}: {d}/{d}{s}\n", .{ r.name, r.ok, r.total, if (r.known_miss) " (missed, as documented)" else "" });
     }
-    out.print("T8: entry sources failed on {d}/10 seeds; rows met {s}\n", .{ t8_sources_found, if (t8_all) "all" else "NOT all" });
-    out.print("T8 criterion (every row 10/10): {s}\n", .{if (t8_all) "MET" else "NOT MET"});
+    out.print("T8: entry sources failed on {d}/{d} seeds; rows met {s}\n", .{ t8_sources_found, n, if (t8_all) "all" else "NOT all" });
+    if (!sweep) {
+        out.print("T8 criterion (every row 10/10): {s}\n", .{if (t8_all) "MET" else "NOT MET"});
+        return;
+    }
+
+    // ---------------- A3 sweep summary ----------------
+    // Primary success per target over N (design v0.3 Amendment A3):
+    // minimality for T1-T7 and T5s, correctness (exact shape) for T9,
+    // the reported failure kind for T9e, and each T8 row. No gate
+    // verdicts: the registered gates are for seeds 0..9.
+    out.print("\n== A3 sweep: seeds {d}..{d} (N = {d}; measurement, not a gate; threshold 80%) ==\n", .{ seeds.from, seeds.to, n });
+    const lines = [_]SweepLine{
+        .{ .label = "T1 minimal (exact 2^28)", .ok = t1_exact },
+        .{ .label = "T2 minimal (single run of 256)", .ok = t2_exact },
+        .{ .label = "T3 minimal (exact rank 2)", .ok = t3_exact },
+        .{ .label = "T4 minimal (list[int 0 x3])", .ok = t4_exact },
+        .{ .label = "T5 minimal (2^21)", .ok = t5_minimal[0] },
+        .{ .label = "T5s minimal (2^20)", .ok = t5_minimal[1] },
+        .{ .label = "T6 minimal ({7,[]})", .ok = t6_min },
+        .{ .label = "T7 minimal ([7])", .ok = t7_min },
+        .{ .label = "T9 correct (exact list[int 0 x3])", .ok = t9_exact },
+        .{ .label = "T9e kind reported (returned_error(UnexpectedLength))", .ok = t9e_kind },
+    };
+    var below: std.ArrayList(u8) = .empty;
+    defer below.deinit(allocator);
+    for (lines) |l| {
+        printRatio(l.label, l.ok, n);
+        if (belowThreshold(l.ok, n)) try below.print(allocator, "{s}{s} ({d}.{d}%)", .{ if (below.items.len > 0) ", " else "", l.label[0..std.mem.indexOfScalar(u8, l.label, ' ').?], l.ok * 1000 / n / 10, l.ok * 1000 / n % 10 });
+    }
+    for (rows) |r| {
+        const label = try std.fmt.allocPrint(allocator, "T8 {s}", .{r.name});
+        defer allocator.free(label);
+        printRatio(label, r.ok, n);
+        if (belowThreshold(r.ok, n)) try below.print(allocator, "{s}T8 {s} ({d}.{d}%)", .{ if (below.items.len > 0) ", " else "", r.name, r.ok * 1000 / n / 10, r.ok * 1000 / n % 10 });
+    }
+    out.print("controls (printed, not an issue condition): T1 {d}/{d}, T2 {d}/{d}, T3 {d}/{d}, T4 {d}/{d}, T6 {d}/{d}, T7 {d}/{d}, T9 {d}/{d}; leaking seeds: T9 {d} (control {d}), T9e {d}\n", .{
+        t1_control_ok, n, t2_control_ok, n, t3_control_ok, n, t4_control_ok, n, t6_ctl, n, t7_ctl, n, t9_ctl, n, t9_leaks, t9_ctl_leaks, t9e_leaks,
+    });
+    out.print("sweep-below-threshold: {s}\n", .{if (below.items.len > 0) below.items else "none"});
 }

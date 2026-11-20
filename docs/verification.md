@@ -108,15 +108,31 @@ Which milestone moved which number (per the milestone commits): M2, M4a, M4b and
   implementation still rests on the evaluation budget, modelled in
   TLA+ as a protocol property.
 - Random-mode draw correctness (uniformity of `intRangeLessThan`
-  usage), OOM paths beyond the sticky-error unit test, and replay
-  exhaustion interplay are only partially tested.
+  usage) and replay exhaustion interplay are only partially tested.
+- OOM: `tests/oom.zig` fails each allocation of a run in turn, both
+  from that point on and as a single transient failure, and requires
+  `error.OutOfMemory` or the result of the run without failures
+  (variant, origin, choices, shrunk choices, failure kind, evaluations,
+  shrink outcome), with no leaks. `zig build test` covers `check` on
+  `[]const u8` and `checkWith` on a recursive type; `zig build oom-full`
+  adds `check` on a recursive type, `u32` and a recursive union,
+  `checkWith` on `[]const u8`, `checkWithOrError`, and the regression
+  replay path. Each case is one seed with small limits and budget, so
+  other sizes, seeds, custom generators and the remaining entry points
+  (`checkCustom`, `checkOrError`, `checkCustomOrError`) are not covered.
+  A swallowed failure that leaves the result unchanged is not detected.
 - The GitHub Actions workflows ran for the first time on
   2026-11-19, after the repository went public: CI and Formal
   verification both passed (the Benchmarks workflow is on-demand
   and has not run yet). Actions are pinned by full commit SHA.
 - Cross-platform behaviour: macOS runs in CI (a macos-latest job,
-  green at the v0.3.0 release); 32-bit `usize` in `length` is still
-  untested.
+  green at the v0.3.0 release). 32-bit `usize`: ci.yml has a
+  non-blocking `test-32bit` job (`zig build test -Dtarget=x86-linux`)
+  that has not run on Actions yet. Locally (2026-11-20, zig 0.17.1) the
+  x86-linux test build fails to compile at `src/shrink.zig` `passChunks`
+  (a `u64` passed where `usize` is expected), and this machine cannot
+  run 32-bit executables at all (a trivial test exits with SIGILL), so
+  no 32-bit test has run.
 - The v2.1 acceptance rule (key sequences, P4 re-expression) has no
   Lean/TLA+ counterpart yet: the formal artifacts model the v2
   protocol, whose rank abstraction happens to match the key view,
