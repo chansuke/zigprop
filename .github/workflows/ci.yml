@@ -26,14 +26,8 @@ jobs:
         run: zig build fmt-check
       - name: Unit and meta tests
         run: zig build test --summary all
-      - name: The core never prints (design v0.3 §4.8, D26)
-        # Only the *OrError wrappers in src/runner.zig may print, via
-        # their local `const print = std.debug.print;` alias.
-        run: |
-          if grep -rn 'std\.debug\.print' src/ | grep -v -e '^src/runner\.zig:[0-9]*:    const print = std\.debug\.print;$' -e '^src/runner\.zig:[0-9]*://!'; then
-            echo "std.debug.print outside the *OrError wrappers" >&2
-            exit 1
-          fi
+      - name: Lint (tools/lint; core-is-pure keeps the core from printing, design v0.3 §4.8, D26)
+        run: zig build lint
       - name: Validation targets (T1-T9e)
         run: zig build validation
       - name: Benchmark harness (smoke)

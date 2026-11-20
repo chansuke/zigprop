@@ -76,8 +76,24 @@ pub fn build(b: *std.Build) void {
     const bench_bin_step = b.step("bench-bin", "Install the benchmark binary");
     bench_bin_step.dependOn(&b.addInstallArtifact(bench_exe, .{}).step);
 
-    // The paths ci.yml passed to `zig fmt --check` before it called fmt-check.
-    const fmt_paths: []const std.Build.LazyPath = &.{ b.path("src"), b.path("tests"), b.path("bench"), b.path("validation"), b.path("build.zig"), b.path("build.zig.zon") };
+    // Custom lint over src/ (tools/lint): `zig build lint [-Dlint-warn]`.
+    const lint_mod = b.createModule(.{
+        .root_source_file = b.path("tools/lint/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const run_lint = b.addRunArtifact(b.addExecutable(.{ .name = "zigprop-lint", .root_module = lint_mod }));
+    run_lint.setCwd(b.path("."));
+    if (b.option(bool, "lint-warn", "Report lint violations without failing") orelse false)
+        run_lint.addArg("--warn");
+    if (b.option([]const u8, "lint-root", "Lint <dir>/src instead of ./src")) |dir|
+        run_lint.addArgs(&.{ "--root", dir });
+    const lint_step = b.step("lint", "Run zigprop's custom lint rules (tools/lint)");
+    lint_step.dependOn(&run_lint.step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lint_mod })).step);
+
+    // The paths ci.yml passed to `zig fmt --check` before it called fmt-check, plus tools.
+    const fmt_paths: []const std.Build.LazyPath = &.{ b.path("src"), b.path("tests"), b.path("bench"), b.path("validation"), b.path("tools"), b.path("build.zig"), b.path("build.zig.zon") };
     const fmt_check_step = b.step("fmt-check", "Check formatting (zig fmt --check); on failure run `zig build fmt`");
     const fmt_check = b.addFmt(.{ .paths = fmt_paths, .check = true });
     // The step name is what a failure prints, so the remedy goes there.
@@ -88,9 +104,9 @@ pub fn build(b: *std.Build) void {
 
     // `verify` is a superset of the ubuntu job in .github/workflows/ci.yml:
     // each ci.yml step calls one of these build steps, so CI and local runs share one definition.
-    // Not yet covered: the "core never prints" grep, which still runs only in ci.yml.
-    const verify_step = b.step("verify", "Run everything the ubuntu CI job runs (fmt-check, test, validation, bench smoke)");
+    const verify_step = b.step("verify", "Run everything the ubuntu CI job runs (fmt-check, lint, test, validation, bench smoke)");
     verify_step.dependOn(fmt_check_step);
+    verify_step.dependOn(lint_step);
     verify_step.dependOn(test_step);
     verify_step.dependOn(validation_step);
     const run_bench_smoke = b.addRunArtifact(bench_exe);

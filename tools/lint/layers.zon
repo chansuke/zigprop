@@ -1,0 +1,10 @@
+// Layer order of src/ (rule layer-order): a file may import only files in
+// lower layers, except for the listed upward edges inside the named function.
+.{
+    .layers = .{ "source", "fingerprint", "gen", "shrink", "runner", "root" },
+    .allowed_upward = .{
+        .{ .from = "source", .to = "gen", .in_fn = "generate", .ref = "design v0.3 §5.2" },
+        .{ .from = "source", .to = "gen", .in_fn = "countElement", .ref = "design v0.3 §5.2" },
+    },
+    .external = .{"std"},
+}

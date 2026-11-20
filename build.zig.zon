@@ -15,6 +15,7 @@
         "tests",
         "bench",
         "validation",
+        "tools",
         "docs",
         "LICENSE",
         "README.md",

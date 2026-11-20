@@ -1,0 +1,19 @@
+// Error names src/ may use (rule no-error-control-flow).
+// A new name needs an entry here with the design section that introduces it.
+.{
+    // Names a caught error may be compared against: only names that the
+    // user's code returns on purpose, by contract.
+    .comparable = .{
+        .{ .name = "InvalidGeneration", .ref = "design v2 §4.2; shrink.zig:194" },
+    },
+    // Names src/ may return (comparing against them is not allowed).
+    .returnable = .{
+        .{ .name = "InvalidGeneration", .ref = "design v2 §4.2" },
+        .{ .name = "InvalidConfig", .ref = "runner.zig validate" },
+        .{ .name = "InvalidBound", .ref = "source.zig sticky error" },
+        .{ .name = "OutOfMemory", .ref = "allocator contract" },
+        .{ .name = "PropertyFailed", .ref = "design v0.3 §5.3 *OrError" },
+        .{ .name = "GaveUp", .ref = "design v0.3 §5.3 *OrError" },
+        .{ .name = "StaleRegression", .ref = "design v0.3 §4.5" },
+    },
+}

@@ -1,0 +1,8 @@
+// Rollout stage per rule (verification pipeline plan §3-2): `.warn` reports
+// without failing (S0), `.@"error"` fails `zig build lint` (S1).
+// `zig build lint -Dlint-warn` reports every rule as a warning.
+.{
+    .@"core-is-pure" = .@"error",
+    .@"no-error-control-flow" = .warn,
+    .@"layer-order" = .warn,
+}
