@@ -19,6 +19,8 @@ jobs:
         zig: ["0.17.1"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # pin-guard reads the base revision with git show
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: ${{ matrix.zig }}
@@ -32,6 +34,13 @@ jobs:
         run: zig build validation
       - name: Benchmark harness (smoke)
         run: zig build bench -Dsmoke
+      # pin-guard needs a base revision, so it is the one step outside `zig build verify`.
+      - name: Pin guard (golden-pin diff against the PR base)
+        if: github.event_name == 'pull_request'
+        run: zig build pin-guard -Dpin-base=origin/${{ github.base_ref }}
+      - name: Pin guard (golden-pin diff against the previous commit)
+        if: github.event_name == 'push'
+        run: zig build pin-guard -Dpin-base=HEAD~1
 
   zig-master:
     name: early warning (zig master, non-blocking)

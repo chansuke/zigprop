@@ -92,6 +92,36 @@ pub fn build(b: *std.Build) void {
     lint_step.dependOn(&run_lint.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lint_mod })).step);
 
+    // Golden-pin diff classifier (tools/pinguard). Not part of `verify`, which
+    // needs no base revision: this is the one CI step outside verify (ci.yml).
+    const pinguard_mod = b.createModule(.{
+        .root_source_file = b.path("tools/pinguard/main.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pinguard_mod })).step);
+    const pin_step = b.step("pin-guard", "Classify golden-pin changes against -Dpin-base=<rev> (head: -Dpin-head=<rev>, default the working tree)");
+    const pin_base = b.option([]const u8, "pin-base", "Base revision for pin-guard");
+    const pin_head = b.option([]const u8, "pin-head", "Head revision for pin-guard (default: the working tree)");
+    if (pin_base) |base| {
+        const run_pin = b.addRunArtifact(b.addExecutable(.{ .name = "zigprop-pinguard", .root_module = pinguard_mod }));
+        run_pin.addArgs(&.{ "--base-label", base, "--head-label", pin_head orelse "working tree" });
+        for ([_][2][]const u8{ .{ "--base-gen", "--head-gen" }, .{ "--base-doc", "--head-doc" } }, [_][]const u8{ "src/gen.zig", "docs/verification.md" }) |flags, path| {
+            run_pin.addArg(flags[0]);
+            run_pin.addFileArg(gitShow(b, base, path));
+            run_pin.addArg(flags[1]);
+            run_pin.addFileArg(if (pin_head) |head| gitShow(b, head, path) else b.path(path));
+        }
+        for ([_][]const u8{ "tests/meta10.zig", "tests/meta10_rec.zig", "tests/meta5.zig" }) |path| {
+            run_pin.addArgs(&.{ "--pins", path });
+            run_pin.addFileArg(gitShow(b, base, path));
+            run_pin.addFileArg(if (pin_head) |head| gitShow(b, head, path) else b.path(path));
+        }
+        pin_step.dependOn(&run_pin.step);
+    } else {
+        pin_step.dependOn(&b.addFail("pin-guard needs -Dpin-base=<rev>").step);
+    }
+
     // The paths ci.yml passed to `zig fmt --check` before it called fmt-check, plus tools.
     const fmt_paths: []const std.Build.LazyPath = &.{ b.path("src"), b.path("tests"), b.path("bench"), b.path("validation"), b.path("tools"), b.path("build.zig"), b.path("build.zig.zon") };
     const fmt_check_step = b.step("fmt-check", "Check formatting (zig fmt --check); on failure run `zig build fmt`");
@@ -112,4 +142,13 @@ pub fn build(b: *std.Build) void {
     const run_bench_smoke = b.addRunArtifact(bench_exe);
     run_bench_smoke.addArg("--smoke");
     verify_step.dependOn(&run_bench_smoke.step);
+}
+
+/// `git show <rev>:<path>`, as a file.
+fn gitShow(b: *std.Build, rev: []const u8, path: []const u8) std.Build.LazyPath {
+    const cmd = b.addSystemCommand(&.{ "git", "show", b.fmt("{s}:{s}", .{ rev, path }) });
+    cmd.setCwd(b.path("."));
+    // A revision name (HEAD, origin/main) can move between runs.
+    cmd.has_side_effects = true;
+    return cmd.captureStdOut(.{});
 }
