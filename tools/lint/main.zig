@@ -565,13 +565,18 @@ pub fn main(init: std.process.Init) !void {
     }
     var config_errors: usize = 0;
     var check_counts = std.EnumArray(repo_rules.Check, usize).initFill(0);
-    for (try repo_rules.lintRepo(arena, repo)) |l| {
+    const repo_result = try repo_rules.lintRepo(arena, repo);
+    for (repo_result.violations) |l| {
         counts.getPtr(l.v.rule).* += 1;
-        if (repo_rules.checkOf(l.v)) |c| check_counts.getPtr(c).* += 1;
+        const check = repo_rules.checkOf(l.v);
+        if (check) |c| check_counts.getPtr(c).* += 1;
         if (l.config_error) {
             config_errors += 1;
         } else if (stageOf(l.v.rule, warn_all) == .@"error") errors += 1;
-        printViolation(l.path, l.v, "not available: a repository-level rule has no allow comment; fix the file, or change the rule's stage in tools/lint/stages.zon (director's decision).");
+        printViolation(l.path, l.v, if (check == .@"path-evidence")
+            "`// zigprop-lint: allow path-evidence <reason>` on a line inside the test block (the reason is required; a marker without one is not an allow)."
+        else
+            "not available: this repository-level check has no allow comment; fix the file, or change the rule's stage in tools/lint/stages.zon (director's decision).");
     }
     if (config_errors > 0) std.debug.print("zigprop-lint: {d} manifest error(s) (fail whatever the stage)\n", .{config_errors});
     errors += config_errors;
@@ -579,7 +584,12 @@ pub fn main(init: std.process.Init) !void {
     for (std.enums.values(Rule)) |r| std.debug.print(" {s} {d} ({s});", .{ @tagName(r), counts.get(r), @tagName(stageOf(r, warn_all)) });
     std.debug.print(" {d} error(s)\n", .{errors});
     std.debug.print("zigprop-lint: evidence-integrity by check:", .{});
-    for (std.enums.values(repo_rules.Check)) |c| std.debug.print(" {d} {s} {d};", .{ @backingInt(c), @tagName(c), check_counts.get(c) });
+    for (std.enums.values(repo_rules.Check)) |c| {
+        std.debug.print(" {d} {s} {d}", .{ @backingInt(c), @tagName(c), check_counts.get(c) });
+        const allowed = repo_result.allowed.get(c);
+        if (allowed > 0) std.debug.print(" ({d} allowed)", .{allowed});
+        std.debug.print(";", .{});
+    }
     std.debug.print("\n", .{});
     if (errors > 0) std.process.exit(1);
 }

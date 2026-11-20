@@ -204,7 +204,7 @@ pub fn checkFormalDrift(arena: Allocator, repo: Repo, out: *std.ArrayList(Locate
 
 const wiring_reason = "A test file that no build.zig list names is never compiled or run, so its tests are evidence in name only (015ce66: tests/meta5.zig was silently unwired because a build.zig edit did not match).";
 const citation_reason = "docs/verification.md is the map from claims to evidence; a cited path or test name that does not exist is a claim with no evidence behind it (aa71b5a, c007748). Test-name rule, applied as written: on a table row (a line starting with `|`) that cites at least one existing tests/ .zig file, every straight double-quoted span without an ellipsis (`…` or `...`) is read as a test name and must equal the name of a `test \"...\"` declaration in one of the .zig files that row cites under tests/.";
-const path_reason = "A regression-driven test can pass while the regression path never ran (a non-failing or stale entry falls back to random search); the block must read the report's path evidence to show which path was taken (c007748, I3; improvement log case 3). Plan §2-2 rule C check 3 amendment (2026-11-20, director): the evidence identifiers are read as v0.3's origin union and regressions summary. Rule: a `test` block that contains both `.regressions =` and a call whose name starts with `check` must read `.origin` (`r.failed.origin.regression.index`, `f.origin == .regression`, `switch (r.failed.origin)`) or a report variant's `.regressions` summary (`r.passed.regressions.passed`, `p.regressions.stale`). Evidence is a read of a field chain through `.origin` or `.regressions`: the token before `.` is an identifier, `)` or `]`, and the chain (`.name`, `.?`, `.*`, `[...]`) does not end as the target of `=` or a compound assignment, so `.{ .regressions = ... }`, `r.failed.origin.regression.index = 0` and `x.regressions.len -= 1` never count. This is a syntactic search for a report-like field-chain read: it does not establish that the receiver is the report returned by the block's `check*` call, nor that the read is asserted.";
+const path_reason = "A regression-driven test can pass while the regression path never ran (a non-failing or stale entry falls back to random search); the block must read the report's path evidence to show which path was taken (c007748, I3; improvement log case 3). Plan §2-2 rule C check 3 amendment (2026-11-20, director): the evidence identifiers are read as v0.3's origin union and regressions summary. Rule: a `test` block that contains both `.regressions =` and a call whose name starts with `check` must read `.origin` (`r.failed.origin.regression.index`, `f.origin == .regression`, `switch (r.failed.origin)`) or a report variant's `.regressions` summary (`r.passed.regressions.passed`, `p.regressions.stale`). Evidence is a read of a field chain through `.origin` or `.regressions`: the token before `.` is an identifier, `)` or `]`, and the chain (`.name`, `.?`, `.*`, `[...]`) does not end as the target of `=` or a compound assignment, so `.{ .regressions = ... }`, `r.failed.origin.regression.index = 0` and `x.regressions.len -= 1` never count. This is a syntactic search for a report-like field-chain read: it does not establish that the receiver is the report returned by the block's `check*` call, nor that the read is asserted. Allow (director, 2026-11-20): a comment line inside the test block that starts with `// zigprop-lint: allow path-evidence` and continues with a reason removes the block from the count; the summary reports it as allowed. A marker with no reason is not an allow, and the block still fires. The reason states why a report field read cannot or need not show the path: the evidence is outside the report, or the claim does not depend on which path ran.";
 
 fn hasPath(paths: []const []const u8, p: []const u8) bool {
     for (paths) |q| if (std.mem.eql(u8, q, p)) return true;
@@ -383,10 +383,29 @@ fn chainIsAssigned(toks: []const Token, start: usize) bool {
     return true;
 }
 
+const path_allow_marker = "// zigprop-lint: allow path-evidence";
+
+/// The reason of a path-evidence allow line in `block`: null without a
+/// marker, "" when every marker lacks a reason.
+fn pathAllow(block: []const u8) ?[]const u8 {
+    var bare = false;
+    var lines = std.mem.splitScalar(u8, block, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, trimmed, path_allow_marker)) continue;
+        const rest = trimmed[path_allow_marker.len..];
+        if (rest.len > 0 and rest[0] != ' ' and rest[0] != '\t') continue;
+        const reason = std.mem.trim(u8, rest, " \t");
+        if (reason.len > 0) return reason;
+        bare = true;
+    }
+    return if (bare) "" else null;
+}
+
 /// Check 3: a `test` block that sets `.regressions =` and calls a `check*`
 /// function reads the report's `.origin` or a variant's `.regressions`
-/// summary (rule in path_reason).
-pub fn checkPathEvidence(arena: Allocator, repo: Repo, out: *std.ArrayList(Located)) !void {
+/// summary, or carries an allow with a reason (rule in path_reason).
+pub fn checkPathEvidence(arena: Allocator, repo: Repo, out: *std.ArrayList(Located), allowed: *usize) !void {
     for (repo.test_files) |f| {
         const toks = try tokenize(arena, f.src);
         for (toks, 0..) |t, i| {
@@ -412,13 +431,19 @@ pub fn checkPathEvidence(arena: Allocator, repo: Repo, out: *std.ArrayList(Locat
                 if (std.mem.startsWith(u8, text, "check") and k + 1 < toks.len and toks[k + 1].tag == .l_paren) calls_check = true;
             }
             if (!regressions or !calls_check or evidence) continue;
+            const allow = pathAllow(f.src[toks[open].loc.start..toks[close].loc.end]);
+            if (allow) |reason| if (reason.len > 0) {
+                allowed.* += 1;
+                continue;
+            };
             const pos = lineCol(f.src, t.loc.start);
             const name = if (i + 1 < toks.len and toks[i + 1].tag == .string_literal) f.src[toks[i + 1].loc.start..toks[i + 1].loc.end] else "(unnamed)";
+            const bare = if (allow != null) " Its `zigprop-lint: allow path-evidence` marker has no reason, so it is not an allow." else "";
             try out.append(arena, .{ .path = f.path, .v = .{
                 .rule = .@"evidence-integrity",
                 .line = pos.line,
                 .col = pos.col,
-                .what = try checkTag(arena, .@"path-evidence", "test {s} runs regressions but never reads the report's `.origin` or `.regressions` summary.", .{name}),
+                .what = try checkTag(arena, .@"path-evidence", "test {s} runs regressions but never reads the report's `.origin` or `.regressions` summary.{s}", .{ name, bare }),
                 .reason = path_reason,
                 .fix = "In the same test block, assert the path the run took: a failure's `.origin` (`.regression` and its entry index), or for a non-failing report its `.regressions` summary (passed count, stale entries).",
                 .example = "try std.testing.expectEqual(@as(usize, 0), report.failed.origin.regression.index);",
@@ -427,13 +452,17 @@ pub fn checkPathEvidence(arena: Allocator, repo: Repo, out: *std.ArrayList(Locat
     }
 }
 
-pub fn lintRepo(arena: Allocator, repo: Repo) ![]const Located {
+/// Violations, and per evidence-integrity check the sites an allow removed.
+pub const Result = struct { violations: []const Located, allowed: std.EnumArray(Check, usize) };
+
+pub fn lintRepo(arena: Allocator, repo: Repo) !Result {
     var out: std.ArrayList(Located) = .empty;
+    var allowed = std.EnumArray(Check, usize).initFill(0);
     try checkFormalDrift(arena, repo, &out);
     try checkWiring(arena, repo, &out);
     try checkCitations(arena, repo, &out);
-    try checkPathEvidence(arena, repo, &out);
-    return out.items;
+    try checkPathEvidence(arena, repo, &out, allowed.getPtr(.@"path-evidence"));
+    return .{ .violations = out.items, .allowed = allowed };
 }
 
 /// The check number of an evidence-integrity violation (from its message).
@@ -461,7 +490,7 @@ const empty_repo: Repo = .{
 };
 
 fn run(arena: Allocator, repo: Repo) ![]const Located {
-    return lintRepo(arena, repo);
+    return (try lintRepo(arena, repo)).violations;
 }
 
 fn expectChecks(expected: []const ?Check, got: []const Located) !void {
@@ -654,11 +683,30 @@ test "evidence-integrity check 3: regression tests must read .origin or the regr
         \\    var r = try zigprop.check(a, u32, p, .{ .seed = 1 });
         \\    _ = r;
         \\}
+        \\test "allowed with a reason" {
+        \\    // zigprop-lint: allow path-evidence the claim holds on either path.
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    _ = r;
+        \\}
+        \\test "a marker without a reason" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    // zigprop-lint: allow path-evidence
+        \\    _ = r;
+        \\}
+        \\test "a longer word is not the marker" {
+        \\    // zigprop-lint: allow path-evidences the claim holds on either path.
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    _ = r;
+        \\}
     }};
-    const got = try run(arena, repo);
-    const fired = [_][]const u8{ "bare", "a nonexistent identifier", "setting fields", "an assigned origin chain", "an assigned regressions chain", "a compound assignment" };
+    const result = try lintRepo(arena, repo);
+    const got = result.violations;
+    const fired = [_][]const u8{ "bare", "a nonexistent identifier", "setting fields", "an assigned origin chain", "an assigned regressions chain", "a compound assignment", "a marker without a reason", "a longer word" };
     const expected: [fired.len]?Check = @splat(.@"path-evidence");
     try expectChecks(&expected, got);
     try std.testing.expectEqual(@as(usize, 1), got[0].v.line);
     for (fired, got) |name, l| try std.testing.expect(std.mem.indexOf(u8, l.v.what, name) != null);
+    try std.testing.expect(std.mem.indexOf(u8, got[6].v.what, "has no reason") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got[7].v.what, "has no reason") == null);
+    try std.testing.expectEqual(@as(usize, 1), result.allowed.get(.@"path-evidence"));
 }
