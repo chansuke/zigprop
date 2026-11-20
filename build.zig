@@ -75,4 +75,25 @@ pub fn build(b: *std.Build) void {
 
     const bench_bin_step = b.step("bench-bin", "Install the benchmark binary");
     bench_bin_step.dependOn(&b.addInstallArtifact(bench_exe, .{}).step);
+
+    // The paths ci.yml passed to `zig fmt --check` before it called fmt-check.
+    const fmt_paths: []const std.Build.LazyPath = &.{ b.path("src"), b.path("tests"), b.path("bench"), b.path("validation"), b.path("build.zig"), b.path("build.zig.zon") };
+    const fmt_check_step = b.step("fmt-check", "Check formatting (zig fmt --check); on failure run `zig build fmt`");
+    const fmt_check = b.addFmt(.{ .paths = fmt_paths, .check = true });
+    // The step name is what a failure prints, so the remedy goes there.
+    fmt_check.step.name = "zig fmt --check (to fix: run `zig build fmt`; it also rewrites deprecated builtins such as @intFromEnum -> @backingInt; do not hand-edit)";
+    fmt_check_step.dependOn(&fmt_check.step);
+    const fmt_step = b.step("fmt", "Format the sources in place (whitespace and deprecated builtins)");
+    fmt_step.dependOn(&b.addFmt(.{ .paths = fmt_paths }).step);
+
+    // `verify` is a superset of the ubuntu job in .github/workflows/ci.yml:
+    // each ci.yml step calls one of these build steps, so CI and local runs share one definition.
+    // Not yet covered: the "core never prints" grep, which still runs only in ci.yml.
+    const verify_step = b.step("verify", "Run everything the ubuntu CI job runs (fmt-check, test, validation, bench smoke)");
+    verify_step.dependOn(fmt_check_step);
+    verify_step.dependOn(test_step);
+    verify_step.dependOn(validation_step);
+    const run_bench_smoke = b.addRunArtifact(bench_exe);
+    run_bench_smoke.addArg("--smoke");
+    verify_step.dependOn(&run_bench_smoke.step);
 }
