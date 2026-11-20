@@ -20,20 +20,19 @@ env:
   TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
-  # The same Lean and TLC checks as formal.yml, on this commit. A release
-  # commit only changes build.zig.zon's version, which matches none of
-  # formal.yml's path filters, so formal.yml would not run on it by itself.
-  formal:
-    uses: ./.github/workflows/formal.yml
-
   verify-release:
     name: verify the tagged commit
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ env.TAG }}
+          ref: refs/tags/${{ env.TAG }}
+      - name: Resolve the tag to the commit every check uses
+        id: resolve
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.17.1
@@ -93,6 +92,36 @@ jobs:
           }
       - name: Consumer smoke (path dependency, fresh cache)
         run: zig build consumer
+      - name: Consumer smoke (fetched archive of the tagged commit)
+        shell: bash
+        working-directory: tests/consumer
+        run: |
+          set -euo pipefail
+          # A path dependency ignores build.zig.zon's .paths; a fetched
+          # package keeps only them, so this is the check that sees a
+          # file missing from the published package.
+          cat > build.zig.zon <<'ZON'
+          .{
+              .name = .zigprop_consumer,
+              .version = "0.0.0",
+              .fingerprint = 0xe540d7659e62b6f4,
+              .minimum_zig_version = "0.17.0",
+              .dependencies = .{},
+              .paths = .{ "build.zig", "build.zig.zon", "consumer.zig" },
+          }
+          ZON
+          zig fetch --save=zigprop "${{ github.server_url }}/${{ github.repository }}/archive/${{ steps.resolve.outputs.sha }}.tar.gz"
+          zig build test --summary all
+
+  # The same Lean and TLC checks as formal.yml, on the commit verify-release
+  # resolved. A release commit only changes build.zig.zon's version, which
+  # matches none of formal.yml's path filters, so formal.yml would not run
+  # on it by itself.
+  formal:
+    needs: verify-release
+    uses: ./.github/workflows/formal.yml
+    with:
+      ref: ${{ needs.verify-release.outputs.sha }}
 
   publish:
     name: publish the release notes
@@ -102,6 +131,17 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: The tag still points at the verified commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED: ${{ needs.verify-release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          now=$(gh api "repos/${{ github.repository }}/commits/refs/tags/$TAG" --jq .sha)
+          if [ "$now" != "$VERIFIED" ]; then
+            echo "$TAG points at $now, but the checks ran on $VERIFIED" >&2
+            exit 1
+          fi
       - name: Create the GitHub release for the tag
         env:
           GH_TOKEN: ${{ github.token }}
