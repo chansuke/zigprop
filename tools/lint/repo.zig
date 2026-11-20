@@ -204,7 +204,7 @@ pub fn checkFormalDrift(arena: Allocator, repo: Repo, out: *std.ArrayList(Locate
 
 const wiring_reason = "A test file that no build.zig list names is never compiled or run, so its tests are evidence in name only (015ce66: tests/meta5.zig was silently unwired because a build.zig edit did not match).";
 const citation_reason = "docs/verification.md is the map from claims to evidence; a cited path or test name that does not exist is a claim with no evidence behind it (aa71b5a, c007748). Test-name rule, applied as written: on a table row (a line starting with `|`) that cites at least one existing tests/ .zig file, every straight double-quoted span without an ellipsis (`…` or `...`) is read as a test name and must equal the name of a `test \"...\"` declaration in one of the .zig files that row cites under tests/.";
-const path_reason = "A regression-driven test can pass while the regression path never ran (a non-failing or stale entry falls back to random search); the block must name `regression_index` to show the path was taken (c007748, I3; improvement log case 3). Rule: a `test` block that contains both `.regressions =` and a call whose name starts with `check` must contain the identifier `regression_index`.";
+const path_reason = "A regression-driven test can pass while the regression path never ran (a non-failing or stale entry falls back to random search); the block must read the report's path evidence to show which path was taken (c007748, I3; improvement log case 3). Plan §2-2 rule C check 3 amendment (2026-11-20, director): the evidence identifiers are read as v0.3's origin union and regressions summary. Rule: a `test` block that contains both `.regressions =` and a call whose name starts with `check` must read `.origin` (`r.failed.origin.regression.index`, `f.origin == .regression`, `switch (r.failed.origin)`) or a report variant's `.regressions` summary (`r.passed.regressions.passed`, `p.regressions.stale`). Evidence is a field access: the token before `.` is an identifier, `)` or `]`, and the token after the name is not `=`, so the configuration's `.{ .regressions = ... }` never counts.";
 
 fn hasPath(paths: []const []const u8, p: []const u8) bool {
     for (paths) |q| if (std.mem.eql(u8, q, p)) return true;
@@ -361,7 +361,8 @@ pub fn checkCitations(arena: Allocator, repo: Repo, out: *std.ArrayList(Located)
 }
 
 /// Check 3: a `test` block that sets `.regressions =` and calls a `check*`
-/// function names `regression_index` (rule in path_reason).
+/// function reads the report's `.origin` or a variant's `.regressions`
+/// summary (rule in path_reason).
 pub fn checkPathEvidence(arena: Allocator, repo: Repo, out: *std.ArrayList(Located)) !void {
     for (repo.test_files) |f| {
         const toks = try tokenize(arena, f.src);
@@ -373,25 +374,31 @@ pub fn checkPathEvidence(arena: Allocator, repo: Repo, out: *std.ArrayList(Locat
             const close = matchingClose(toks, open, .l_brace, .r_brace);
             var regressions = false;
             var calls_check = false;
-            var index = false;
+            var evidence = false;
             for (open..close) |k| {
                 const text = f.src[toks[k].loc.start..toks[k].loc.end];
                 if (toks[k].tag != .identifier) continue;
-                if (std.mem.eql(u8, text, "regression_index")) index = true;
-                if (std.mem.eql(u8, text, "regressions") and k > 0 and toks[k - 1].tag == .period and k + 1 < toks.len and toks[k + 1].tag == .equal) regressions = true;
+                const field = k > 0 and toks[k - 1].tag == .period;
+                const assigned = k + 1 < toks.len and toks[k + 1].tag == .equal;
+                const read = field and !assigned and k > 1 and switch (toks[k - 2].tag) {
+                    .identifier, .r_paren, .r_bracket => true,
+                    else => false,
+                };
+                if (std.mem.eql(u8, text, "regressions") and field and assigned) regressions = true;
+                if (read and (std.mem.eql(u8, text, "origin") or std.mem.eql(u8, text, "regressions"))) evidence = true;
                 if (std.mem.startsWith(u8, text, "check") and k + 1 < toks.len and toks[k + 1].tag == .l_paren) calls_check = true;
             }
-            if (!regressions or !calls_check or index) continue;
+            if (!regressions or !calls_check or evidence) continue;
             const pos = lineCol(f.src, t.loc.start);
             const name = if (i + 1 < toks.len and toks[i + 1].tag == .string_literal) f.src[toks[i + 1].loc.start..toks[i + 1].loc.end] else "(unnamed)";
             try out.append(arena, .{ .path = f.path, .v = .{
                 .rule = .@"evidence-integrity",
                 .line = pos.line,
                 .col = pos.col,
-                .what = try checkTag(arena, .@"path-evidence", "test {s} runs regressions but never names `regression_index`.", .{name}),
+                .what = try checkTag(arena, .@"path-evidence", "test {s} runs regressions but never reads the report's `.origin` or `.regressions` summary.", .{name}),
                 .reason = path_reason,
-                .fix = "Assert that the failure came from the regression entry, through `regression_index`, in the same test block.",
-                .example = "try std.testing.expect(report.failed.regression_index != null);",
+                .fix = "In the same test block, assert the path the run took: a failure's `.origin` (`.regression` and its entry index), or for a non-failing report its `.regressions` summary (passed count, stale entries).",
+                .example = "try std.testing.expectEqual(@as(usize, 0), report.failed.origin.regression.index);",
             } });
         }
     }
@@ -561,7 +568,7 @@ test "evidence-integrity check 2: missing paths and unknown quoted test names" {
     try std.testing.expect(std.mem.indexOf(u8, got[1].v.what, "made up") != null);
 }
 
-test "evidence-integrity check 3: regression tests must name regression_index" {
+test "evidence-integrity check 3: regression tests must read .origin or the regressions summary" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -573,9 +580,34 @@ test "evidence-integrity check 3: regression tests must name regression_index" {
         \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
         \\    _ = r;
         \\}
-        \\test "asserted" {
+        \\test "origin index" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    try expectEqual(0, r.failed.origin.regression.index);
+        \\}
+        \\test "origin tag" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    try expect(r.failed.origin == .random);
+        \\}
+        \\test "origin switch" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    switch (r.failed.origin) { .regression => {}, .random => unreachable }
+        \\}
+        \\test "summary read" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    try expectEqual(1, r.passed.regressions.passed);
+        \\}
+        \\test "captured summary read" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    switch (r) { .passed => |s| try expectEqual(0, s.regressions.stale.len), else => unreachable }
+        \\}
+        \\test "a nonexistent identifier is not evidence" {
         \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
         \\    try expect(r.failed.regression_index != null);
+        \\}
+        \\test "setting fields is not evidence" {
+        \\    var r = try zigprop.check(a, u32, p, .{ .regressions = &e });
+        \\    const o: Origin = .{ .origin = undefined };
+        \\    _ = .{ r, o };
         \\}
         \\test "no regressions" {
         \\    var r = try zigprop.check(a, u32, p, .{ .seed = 1 });
@@ -583,6 +615,8 @@ test "evidence-integrity check 3: regression tests must name regression_index" {
         \\}
     }};
     const got = try run(arena, repo);
-    try expectChecks(&.{.@"path-evidence"}, got);
+    try expectChecks(&.{ .@"path-evidence", .@"path-evidence", .@"path-evidence" }, got);
     try std.testing.expectEqual(@as(usize, 1), got[0].v.line);
+    try std.testing.expect(std.mem.indexOf(u8, got[1].v.what, "a nonexistent identifier") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got[2].v.what, "setting fields") != null);
 }
