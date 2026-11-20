@@ -92,3 +92,18 @@ jobs:
             echo "ZigpropRunnerRatchetBad.cfg was expected to violate AcceptsBoundedByMeasure" >&2
             exit 1
           fi
+      - name: Run TLC (ZigpropRunnerRatchetTight.cfg must violate AcceptsBelowMeasureBound)
+        working-directory: formal/tla
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The violation shows 11 acceptances are reachable, so the bound
+          # checked by ZigpropRunnerRatchet.cfg is tight.
+          java -jar /tmp/tla2tools.jar -config ZigpropRunnerRatchetTight.cfg ZigpropRunner.tla \
+            > /tmp/tlc-ratchet-tight.out 2>&1 || true
+          cat /tmp/tlc-ratchet-tight.out
+          grep -q "Error: Invariant AcceptsBelowMeasureBound is violated." /tmp/tlc-ratchet-tight.out
+          if grep -q "Model checking completed. No error has been found." /tmp/tlc-ratchet-tight.out; then
+            echo "ZigpropRunnerRatchetTight.cfg was expected to violate AcceptsBelowMeasureBound" >&2
+            exit 1
+          fi

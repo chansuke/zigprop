@@ -26,6 +26,7 @@ implementation's acceptances through the accept hook.
 | `ZigpropRunnerNoDiscard.cfg` | No discards tolerated | No error |
 | `ZigpropRunnerRatchet.cfg` | P4's lateral move with the decrease check, budget with room above the measure bound | No error |
 | `ZigpropRunnerRatchetBad.cfg` | The same without the decrease check | `AcceptsBoundedByMeasure` is violated |
+| `ZigpropRunnerRatchetTight.cfg` | `Ratchet` with the invariant one below the bound (`accepts <= 10`) | `AcceptsBelowMeasureBound` is violated |
 
 The first four set `MaxNC = 0`, so `ShrinkRatchet` is never enabled.
 Their state counts grew where a run can accept more than once
@@ -36,9 +37,10 @@ of the pre-ratchet variables only, both give the pre-ratchet counts again
 (589 and 205).
 
 All invariants: `TypeOK`, `BestAlwaysFails`, `BestOnlyAfterFailure`,
-`OutcomeConsistency`, and, for the two ratchet configurations,
-`AcceptsBoundedByMeasure`. All configurations except `RatchetBad` also
-check the liveness property `Termination`.
+`OutcomeConsistency`, and, for `Ratchet` and `RatchetBad`,
+`AcceptsBoundedByMeasure`. All configurations except `RatchetBad` and
+`RatchetTight` also check the liveness property `Termination`.
+`RatchetTight` checks only `AcceptsBelowMeasureBound`.
 
 ## Run
 
@@ -60,7 +62,13 @@ Do not commit them.
 `AcceptsBoundedByMeasure` says that the number of acceptances is at most
 the measure bound, independently of the budget. In
 `ZigpropRunnerRatchet.cfg` the bound is (3 + 1) × (2 + 1) − 1 = 11, and
-TLC reaches 11 acceptances, so the bound is tight. `MaxBudget = 16`
+TLC reaches 11 acceptances, so the bound is tight.
+`ZigpropRunnerRatchetTight.cfg` keeps that fixed: with the invariant
+`accepts <= 10`, TLC must find a violation. It does, with a 13-state
+trace: the regression entry fails at rank 3 with `nc = 2`, then at each
+rank two `ShrinkRatchet` steps take `nc` to 0 and one `ShrinkAccept`
+lowers the rank, until `accepts = 11` at rank 0 in state 13 (3101
+distinct states). `MaxBudget = 16`
 leaves room for more than 11 acceptances, so the budget alone does not
 make the check hold. The measure bounds acceptances only, not the run:
 `ShrinkReject` also spends a budget unit and leaves the measure

@@ -283,6 +283,11 @@ OutcomeConsistency ==
 AcceptsBoundedByMeasure ==
     accepts <= (MaxRank + 1) * (MaxNC + 1) - 1
 
+\* One below the bound. ZigpropRunnerRatchetTight.cfg expects TLC to
+\* violate it, which shows the bound above is reached, not just respected.
+AcceptsBelowMeasureBound ==
+    accepts <= (MaxRank + 1) * (MaxNC + 1) - 2
+
 \* ------------------------------ liveness --------------------------------
 
 \* Under weak fairness on progress, every run eventually finishes.

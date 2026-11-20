@@ -21,7 +21,7 @@ design v0.3 (`docs/design-v0.3.md`, M1–M7).
 | 6 | Zigzag rank encoding (D1, MF7) | Over unbounded `Int`/`Nat`, the encoding is a bijection with the specified sign order, the exact magnitude formula `(r+1)/2`, and magnitude monotonicity in the rank (Lean `Zigzag.lean`). The connection to finite integer types (rank ranges, minimum values) is not proved |
 | 7 | Shortlex acceptance cannot cycle (MF2, MF4) | Over `List Nat`, shortlex is a strict partial order and acceptance never grows the stored length (Lean `Shortlex.lean`). That the implementation applies it to re-recorded consumed values is milestone-3 test territory, not yet verified |
 | 8 | Counterexamples are stored only after confirmed failure (MF5) | In the finite abstract model (now including the regressions phase and infrastructure-error aborts), a stored rank always belongs to the fixed `Failing` set (TLA+ `BestAlwaysFails`). Evaluation handling and Report construction in the implementation are not yet verified |
-| 9 | `fixed_point` / `budget_exhausted` semantics (MF4) | The TLA+ model encodes pass rounds: `fixed_point` is reported only after a full round with no acceptance (`clean_finish`), `budget_exhausted` only at budget 0 before such a round completes. TLC checks this on 5 configurations (`ZigpropRunner`, `Empty`, `Zero`, `NoDiscard`, `Ratchet`); the sixth, `RatchetBad`, is expected to fail (Layers) |
+| 9 | `fixed_point` / `budget_exhausted` semantics (MF4) | The TLA+ model encodes pass rounds: `fixed_point` is reported only after a full round with no acceptance (`clean_finish`), `budget_exhausted` only at budget 0 before such a round completes. TLC checks this on 5 configurations (`ZigpropRunner`, `Empty`, `Zero`, `NoDiscard`, `Ratchet`); two more, `RatchetBad` and `RatchetTight`, are expected to fail (Layers) |
 | 10 | Termination | In the finite abstract model, under weak fairness on progress transitions and assuming each individual evaluation terminates, all runs reach `done` (TLC, the same 5 configurations). Implementation and user-callback termination are out of scope |
 | 11 | `gave_up` semantics | In the model, `gave_up` holds exactly when discards exceed the budget (`MaxDiscards + 1`) before enough valid cases; pass/fail attempts are blocked after the exceed. A `MaxDiscards = 0` configuration is checked |
 | 12 | Performance | Single-run microbenchmarks of some Source operations with pre-reserved recording capacity are recorded as a baseline (`bench/BASELINE.md`). Allocation behaviour, generators, runner and shrink performance are unmeasured |
@@ -80,11 +80,12 @@ Which milestone moved which number (per the milestone commits): M2, M4a, M4b and
   is an auxiliary check only.
 - **TLA+ / TLC** (`formal/tla`, CI: formal.yml) — the runner/shrink
   *protocol* as a state machine, with choice sequences abstracted to
-  shortlex ranks. Six configurations: four cover the base protocol,
+  shortlex ranks. Seven configurations: four cover the base protocol,
   the empty failing set, rank 0, and a zero discard budget;
-  `Ratchet` adds P4's lateral move with the decrease check, and
+  `Ratchet` adds P4's lateral move with the decrease check;
   `RatchetBad` drops the check and must violate
-  `AcceptsBoundedByMeasure`.
+  `AcceptsBoundedByMeasure`; `RatchetTight` must violate
+  `accepts <= 10`, so the bound of 11 stays reachable.
 - **Benchmarks** (`zig build bench`, CI: smoke in ci.yml, full in
   bench.yml) — performance evidence, not correctness gates.
 
