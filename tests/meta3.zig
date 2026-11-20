@@ -184,13 +184,27 @@ fn failThenBoom(ctx: *GenContext) anyerror!u32 {
     return error.Boom;
 }
 
+/// The first value smallOnlyRecorded saw fail. checkCustom returns an
+/// error here, so there is no report whose `.origin` could show the path.
+var first_failing: ?u32 = null;
+fn smallOnlyRecorded(x: u32) bool {
+    if (x >= 10 and first_failing == null) first_failing = x;
+    return x < 10;
+}
+
 test "shrink: a generator error during shrinking propagates, never becomes an outcome" {
     boom_calls = 0;
+    first_failing = null;
     const entries = [_]zigprop.Regression{.{ .id = "t", .gen_version = zigprop.generator_version, .choices = &.{25} }};
-    try std.testing.expectError(error.Boom, zigprop.checkCustom(std.testing.allocator, u32, failThenBoom, smallOnly, .{
+    try std.testing.expectError(error.Boom, zigprop.checkCustom(std.testing.allocator, u32, failThenBoom, smallOnlyRecorded, .{
         .regressions = &entries,
         .regression_id = "t",
     }));
+    // Path evidence: the one generated value was the entry's 25 and it
+    // failed, so Boom (the second generator call) came after the first
+    // failure, during shrinking.
+    try std.testing.expectEqual(@as(usize, 2), boom_calls);
+    try std.testing.expectEqual(@as(?u32, 25), first_failing);
 }
 
 var counting_calls: usize = 0;
