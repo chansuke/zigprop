@@ -39,6 +39,6 @@
             .{ .file = "src/shrink.zig", .func = "shrinkWith" },
         },
         .hash = 0x904fdfe396446c2f,
-        .checked_against = "design v2 (§5-§7) + one v0.3 header note: a finite rank abstraction of the runner/shrink protocol, not a refinement of the implementation; P4's lateral move is unmodelled. shrinkWith's hash covers every pass, since they are nested in its body.",
+        .checked_against = "design v2 (§5-§7) + one v0.3 header note + P4 (v2.1) as ShrinkRatchet over a number nc: a finite rank abstraction of the runner/shrink protocol, not a refinement of the implementation; it does not check that tryRatchet counts or rewrites pairs as modelled. shrinkWith's hash covers every pass, since they are nested in its body.",
     },
 }

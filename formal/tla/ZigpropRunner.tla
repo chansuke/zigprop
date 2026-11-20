@@ -8,6 +8,10 @@
 (* abstraction, not a proven refinement of shortlex on sequences: TLC     *)
 (* checks the protocol rules below, not the sequence comparison itself.   *)
 (* v0.3 passes are ShrinkAccept instances; stale is in RegressionPass.    *)
+(* P4's lateral move (design v2.1) is ShrinkRatchet: the rank stays and   *)
+(* `nc`, the number of pairs outside class 3, goes down. `nc` is a number *)
+(* here; the model does not check that the implementation counts pairs or *)
+(* rewrites them this way (see formal/tla/README.md).                     *)
 (*                                                                          *)
 (* Protocol rules modelled:                                               *)
 (*  - regressions replay first; a failing regression enters shrinking     *)
@@ -35,17 +39,22 @@ CONSTANTS
     Failing,     \* subset of 0..MaxRank: ranks that fail the property
     MaxBudget,   \* shrink evaluation budget
     MaxCases,    \* valid cases to find before reporting "passed"
-    MaxDiscards  \* discards tolerated before reporting "gave_up"
+    MaxDiscards, \* discards tolerated before reporting "gave_up"
+    MaxNC,       \* pairs outside class 3 are 0..MaxNC (0 disables P4)
+    RatchetChecksDecrease \* TRUE: P4 accepts only a smaller nc
 
 ASSUME Failing \subseteq 0..MaxRank
+ASSUME RatchetChecksDecrease \in BOOLEAN
 
 None == MaxRank + 1  \* sentinel: no counterexample stored
 
+\* nc: pairs outside class 3 in the stored counterexample.
+\* accepts: shrink acceptances so far (ShrinkAccept and ShrinkRatchet).
 VARIABLES phase, best, budget, cases, discards, outcome,
-          evaluated, changed, clean_finish
+          evaluated, changed, clean_finish, nc, accepts
 
 vars == <<phase, best, budget, cases, discards, outcome,
-          evaluated, changed, clean_finish>>
+          evaluated, changed, clean_finish, nc, accepts>>
 
 Outcomes == {"none", "passed", "failed_fixed_point",
              "failed_budget_exhausted", "gave_up", "aborted"}
@@ -60,6 +69,8 @@ TypeOK ==
     /\ evaluated \in BOOLEAN
     /\ changed \in BOOLEAN
     /\ clean_finish \in BOOLEAN
+    /\ nc \in 0..MaxNC
+    /\ accepts \in 0..MaxBudget  \* every acceptance spends one budget unit
 
 Init ==
     /\ phase = "regressions"
@@ -71,22 +82,26 @@ Init ==
     /\ evaluated = FALSE
     /\ changed = FALSE
     /\ clean_finish = FALSE
+    /\ nc = 0
+    /\ accepts = 0
 
 \* --------------------------- regressions phase --------------------------
 
+\* A confirmed failure stores a counterexample with any nc.
 RegressionFail ==
     /\ phase = "regressions"
-    /\ \E r \in Failing :
+    /\ \E r \in Failing, n \in 0..MaxNC :
         /\ best' = r
+        /\ nc' = n
         /\ phase' = "shrinking"
         /\ UNCHANGED <<budget, cases, discards, outcome,
-                       evaluated, changed, clean_finish>>
+                       evaluated, changed, clean_finish, accepts>>
 
 RegressionPass ==
     /\ phase = "regressions"
     /\ phase' = "searching"
     /\ UNCHANGED <<best, budget, cases, discards, outcome,
-                   evaluated, changed, clean_finish>>
+                   evaluated, changed, clean_finish, nc, accepts>>
 
 \* ------------------------- random search phase --------------------------
 
@@ -96,24 +111,25 @@ AttemptPass ==
     /\ discards <= MaxDiscards
     /\ cases' = cases + 1
     /\ UNCHANGED <<phase, best, budget, discards, outcome,
-                   evaluated, changed, clean_finish>>
+                   evaluated, changed, clean_finish, nc, accepts>>
 
 AttemptDiscard ==
     /\ phase = "searching"
     /\ discards <= MaxDiscards
     /\ discards' = discards + 1
     /\ UNCHANGED <<phase, best, budget, cases, outcome,
-                   evaluated, changed, clean_finish>>
+                   evaluated, changed, clean_finish, nc, accepts>>
 
 AttemptFail ==
     /\ phase = "searching"
     /\ cases < MaxCases
     /\ discards <= MaxDiscards
-    /\ \E r \in Failing :
+    /\ \E r \in Failing, n \in 0..MaxNC :
         /\ best' = r
+        /\ nc' = n
         /\ phase' = "shrinking"
         /\ UNCHANGED <<budget, cases, discards, outcome,
-                       evaluated, changed, clean_finish>>
+                       evaluated, changed, clean_finish, accepts>>
 
 FinishPassed ==
     /\ phase = "searching"
@@ -121,7 +137,7 @@ FinishPassed ==
     /\ phase' = "done"
     /\ outcome' = "passed"
     /\ UNCHANGED <<best, budget, cases, discards,
-                   evaluated, changed, clean_finish>>
+                   evaluated, changed, clean_finish, nc, accepts>>
 
 FinishGaveUp ==
     /\ phase = "searching"
@@ -130,20 +146,40 @@ FinishGaveUp ==
     /\ phase' = "done"
     /\ outcome' = "gave_up"
     /\ UNCHANGED <<best, budget, cases, discards,
-                   evaluated, changed, clean_finish>>
+                   evaluated, changed, clean_finish, nc, accepts>>
 
 \* ----------------------------- shrink phase -----------------------------
 
+\* P1-P3, P5, P6, P1b (tryAccept): the rank goes down; the new
+\* counterexample's nc is anything, it may grow.
 ShrinkAccept ==
     /\ phase = "shrinking"
     /\ budget > 0
-    /\ \E r \in Failing :
+    /\ \E r \in Failing, n \in 0..MaxNC :
         /\ r < best
         /\ best' = r
+        /\ nc' = n
         /\ budget' = budget - 1
         /\ evaluated' = TRUE
         /\ changed' = TRUE
+        /\ accepts' = accepts + 1
         /\ UNCHANGED <<phase, cases, discards, outcome, clean_finish>>
+
+\* P4 (tryRatchet): a key-equal rewrite, so the rank stays. With the
+\* decrease check nc goes down; without it nc may stay, a lateral move
+\* that changes nothing the measure sees.
+ShrinkRatchet ==
+    /\ phase = "shrinking"
+    /\ budget > 0
+    /\ best # None
+    /\ nc > 0
+    /\ \E n \in (IF RatchetChecksDecrease THEN 0..(nc - 1) ELSE 0..nc) :
+        /\ nc' = n
+        /\ budget' = budget - 1
+        /\ evaluated' = TRUE
+        /\ changed' = TRUE
+        /\ accepts' = accepts + 1
+        /\ UNCHANGED <<phase, best, cases, discards, outcome, clean_finish>>
 
 ShrinkReject ==
     /\ phase = "shrinking"
@@ -151,7 +187,7 @@ ShrinkReject ==
     /\ budget' = budget - 1
     /\ evaluated' = TRUE
     /\ UNCHANGED <<phase, best, cases, discards, outcome,
-                   changed, clean_finish>>
+                   changed, clean_finish, nc, accepts>>
 
 StartNextRound ==
     /\ phase = "shrinking"
@@ -160,7 +196,7 @@ StartNextRound ==
     /\ evaluated' = FALSE
     /\ changed' = FALSE
     /\ UNCHANGED <<phase, best, budget, cases, discards, outcome,
-                   clean_finish>>
+                   clean_finish, nc, accepts>>
 
 FinishFixedPoint ==
     /\ phase = "shrinking"
@@ -169,7 +205,8 @@ FinishFixedPoint ==
     /\ phase' = "done"
     /\ outcome' = "failed_fixed_point"
     /\ clean_finish' = TRUE
-    /\ UNCHANGED <<best, budget, cases, discards, evaluated, changed>>
+    /\ UNCHANGED <<best, budget, cases, discards, evaluated, changed,
+                   nc, accepts>>
 
 FinishBudgetExhausted ==
     /\ phase = "shrinking"
@@ -178,7 +215,7 @@ FinishBudgetExhausted ==
     /\ phase' = "done"
     /\ outcome' = "failed_budget_exhausted"
     /\ UNCHANGED <<best, budget, cases, discards,
-                   evaluated, changed, clean_finish>>
+                   evaluated, changed, clean_finish, nc, accepts>>
 
 \* ------------------------- infrastructure errors ------------------------
 
@@ -187,7 +224,7 @@ InfraError ==
     /\ phase' = "done"
     /\ outcome' = "aborted"
     /\ UNCHANGED <<best, budget, cases, discards,
-                   evaluated, changed, clean_finish>>
+                   evaluated, changed, clean_finish, nc, accepts>>
 
 DoneStep ==
     /\ phase = "done"
@@ -202,6 +239,7 @@ Next ==
     \/ FinishPassed
     \/ FinishGaveUp
     \/ ShrinkAccept
+    \/ ShrinkRatchet
     \/ ShrinkReject
     \/ StartNextRound
     \/ FinishFixedPoint
@@ -232,6 +270,18 @@ OutcomeConsistency ==
     /\ outcome = "failed_budget_exhausted" => budget = 0
     /\ outcome = "gave_up"
         => discards = MaxDiscards + 1 /\ cases < MaxCases
+
+\* Acceptances are bounded by the measure (rank, nc), not by the budget.
+\* Derivation: shrinking starts only after a confirmed failure, so best
+\* is a failing rank in 0..MaxRank whenever ShrinkAccept or ShrinkRatchet
+\* is enabled; the sentinel None never takes part in an acceptance
+\* (BestAlwaysFails, BestOnlyAfterFailure). The measure therefore takes
+\* (MaxRank + 1) * (MaxNC + 1) values. ShrinkAccept lowers the rank and
+\* ShrinkRatchet (with the decrease check) keeps the rank and lowers nc,
+\* so each acceptance moves the pair strictly down in lexicographic order.
+\* A strictly descending chain through N values has at most N - 1 steps.
+AcceptsBoundedByMeasure ==
+    accepts <= (MaxRank + 1) * (MaxNC + 1) - 1
 
 \* ------------------------------ liveness --------------------------------
 

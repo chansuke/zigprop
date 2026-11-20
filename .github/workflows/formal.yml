@@ -61,9 +61,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for cfg in ZigpropRunner.cfg ZigpropRunnerEmpty.cfg ZigpropRunnerZero.cfg ZigpropRunnerNoDiscard.cfg; do
+          for cfg in ZigpropRunner.cfg ZigpropRunnerEmpty.cfg ZigpropRunnerZero.cfg ZigpropRunnerNoDiscard.cfg ZigpropRunnerRatchet.cfg; do
             echo "== $cfg"
             java -jar /tmp/tla2tools.jar -config "$cfg" ZigpropRunner.tla \
               | tee "/tmp/tlc-$cfg.out"
             grep -q "Model checking completed. No error has been found." "/tmp/tlc-$cfg.out"
           done
+      - name: Run TLC (ZigpropRunnerRatchetBad.cfg must violate AcceptsBoundedByMeasure)
+        working-directory: formal/tla
+        shell: bash
+        run: |
+          set -euo pipefail
+          # TLC exits non-zero on the expected violation; the greps decide.
+          java -jar /tmp/tla2tools.jar -config ZigpropRunnerRatchetBad.cfg ZigpropRunner.tla \
+            > /tmp/tlc-ratchet-bad.out 2>&1 || true
+          cat /tmp/tlc-ratchet-bad.out
+          grep -q "Error: Invariant AcceptsBoundedByMeasure is violated." /tmp/tlc-ratchet-bad.out
+          if grep -q "Model checking completed. No error has been found." /tmp/tlc-ratchet-bad.out; then
+            echo "ZigpropRunnerRatchetBad.cfg was expected to violate AcceptsBoundedByMeasure" >&2
+            exit 1
+          fi
