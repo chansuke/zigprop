@@ -1169,3 +1169,19 @@ v0.2.1 already shrinks T7 to `[7]` in 8/10 seeds, so T7's gate does
 not discriminate v0.3 from v0.2.1 on those seeds. The target and its
 gate stay as registered (no post-hoc goalpost moves); the baseline is
 recorded honestly in verification.md and the M3 report.
+
+### A3 (2026-11-20, registered before the sweep is implemented or run)
+
+A nightly sweep runs T1 through T9e on seeds **10 through 109**
+(inclusive, 100 seeds), with `max_cases` and `shrink_budget` as in
+§8.3. The sweep is a **measurement, not a gate**: the registered
+conditions of §8.3 (seeds 0–9 and each target's gate) do not change.
+For each target the sweep reports its primary success count divided by
+N, the number of seeds run: minimality for T1–T7 and T5s, correctness
+for T9, the reported failure kind for T9e, and each row for T8. If any
+ratio is below 80%, the nightly job opens an issue. Control and leak
+counts are printed but do not open an issue. The threshold, the seed
+range and the gates are not moved after seeing the results. Reason: to
+measure how well gates that 10 seeds could not separate (T7,
+verification.md row 27) discriminate, and to warn early of a gradual
+loss of minimality (the K2 pattern).
