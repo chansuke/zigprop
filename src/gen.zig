@@ -510,7 +510,7 @@ fn floatRankToValue(comptime T: type, rank: u64) T {
     const p = comptime floatParts(T);
     const a = floatCanonicalMagnitude(T, rank >> 1);
     const U = @Int(.unsigned, p.bits);
-    const bits: U = @intCast((rank & 1) << @intCast(p.bits - 1) | a);
+    const bits: U = @intCast(((rank & 1) << @intCast(p.bits - 1)) | a);
     return @bitCast(bits);
 }
 
