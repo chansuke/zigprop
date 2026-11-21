@@ -112,7 +112,7 @@ pub fn build(b: *std.Build) void {
         run_lint.addArg("--warn");
     if (b.option(bool, "lint-print-hashes", "Print the current formal/manifest.zon hashes") orelse false)
         run_lint.addArg("--print-hashes");
-    if (b.option([]const u8, "lint-root", "Lint the repository at <dir> (src, tests, build.zig, docs, formal) instead of .")) |dir|
+    if (b.option([]const u8, "lint-root", "Lint the repository at <dir> (src, tests, build.zig, docs, formal, .github/workflows/ci.yml) instead of .")) |dir|
         run_lint.addArgs(&.{ "--root", dir });
     const lint_step = b.step("lint", "Run zigprop's custom lint rules (tools/lint)");
     lint_step.dependOn(&run_lint.step);

@@ -7,4 +7,5 @@
     .@"layer-order" = .@"error",
     .@"formal-drift" = .warn,
     .@"evidence-integrity" = .warn,
+    .@"ci-parity" = .warn,
 }

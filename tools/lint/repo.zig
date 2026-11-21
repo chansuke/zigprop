@@ -3,8 +3,9 @@
 //! listed in formal/manifest.zon; `evidence-integrity` checks that tests are
 //! wired into build.zig (check 1), that docs/verification.md cites paths and
 //! test names that exist (check 2), and that regression-driven tests assert
-//! the regression path (check 3). Every function here is pure: main.zig reads
-//! the files and passes them in a `Repo`.
+//! the regression path (check 3); `ci-parity` checks that every `run:` in
+//! .github/workflows/ci.yml goes through `zig build`. Every function here is
+//! pure: main.zig reads the files and passes them in a `Repo`.
 
 const std = @import("std");
 const lint = @import("main.zig");
@@ -27,6 +28,8 @@ pub const Repo = struct {
     test_files: []const SourceFile,
     /// Every file and directory under src, tests, formal, bench and docs, repo-relative.
     paths: []const []const u8,
+    /// .github/workflows/ci.yml, or null when the file does not exist (a ci-parity violation).
+    ci_yml: ?[]const u8,
 };
 
 pub const Located = struct {
@@ -452,6 +455,223 @@ pub fn checkPathEvidence(arena: Allocator, repo: Repo, out: *std.ArrayList(Locat
     }
 }
 
+// ---------------------------------------------------------------------
+// ci-parity
+
+pub const ci_path = ".github/workflows/ci.yml";
+
+const parity_reason = "A check that runs only in CI never runs in `zig build verify`, so the local gate and CI drift apart (improvement log case 5: a recovery commit passed tests but skipped `zig fmt --check`; verification pipeline plan §2-0). Rule, as written: only .github/workflows/ci.yml is read (other workflows are not). Each `run:` value is split into commands at newlines, `;`, `&`, `&&`, `|` and `||` (not at the `&` of `>&`, `<&` or `&>`); quotes are not parsed, so a separator inside quotes splits there too, and a line ending in `\\` continues onto the next. Words are split at spaces and tabs; leading `NAME=value` words are skipped, and the next word must be `zig` followed by `build`, or `tee` directly after a single `|` (the only sink: compile-budget's output goes to the step summary). Readable `run:` forms: a one-line plain or quoted value (escapes are not processed) and a block scalar (`|` or `>`, with any chomping or indentation indicator) whose body is indented past the key. Any other form (a flow mapping `{ run: ... }`, an anchor, alias or tag, a plain or quoted value continued on the next line, a quoted `\"run\"` key), any text that names `run:` outside the key position, and any line that is neither a key, a list item, a comment nor a block-scalar body is itself a violation; a missing ci.yml is a violation. Not seen: what a `zig build` step does (intended: checks live in build.zig behind one entry point), anything inside an allowed command's arguments (`$(...)`, backticks, `${{ }}`) and the value of a skipped `NAME=value` word, the `shell:` key, and `uses:` steps; heredoc bodies are not skipped but read as commands.";
+const parity_fix = "Make the check a step in build.zig and call it from ci.yml as `zig build <step>`, so `zig build verify` runs what CI runs.";
+const parity_example = "ci.yml: `run: zig build lint` (the former `grep -rn 'std\\.debug\\.print' src` step is now the core-is-pure rule inside it)";
+
+/// Commands allowed directly after a single `|` (they receive `zig build`'s output).
+const pipe_sinks = [_][]const u8{"tee"};
+
+fn parity(arena: Allocator, out: *std.ArrayList(Located), text: []const u8, offset: usize, comptime fmt: []const u8, args: anytype) !void {
+    const pos = lineCol(text, offset);
+    try out.append(arena, .{ .path = ci_path, .v = .{
+        .rule = .@"ci-parity",
+        .line = pos.line,
+        .col = pos.col,
+        .what = try std.fmt.allocPrint(arena, fmt, args),
+        .reason = parity_reason,
+        .fix = parity_fix,
+        .example = parity_example,
+    } });
+}
+
+fn offsetIn(text: []const u8, part: []const u8) usize {
+    return @intFromPtr(part.ptr) - @intFromPtr(text.ptr);
+}
+
+fn isKeyChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '-';
+}
+
+/// The length of a plain mapping key at the start of `s` (`name` in
+/// `name: x` or `name:`), or null.
+fn keyLen(s: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < s.len and isKeyChar(s[i])) i += 1;
+    if (i == 0 or i >= s.len or s[i] != ':') return null;
+    if (i + 1 < s.len and s[i + 1] != ' ' and s[i + 1] != '\t' and s[i + 1] != '\r') return null;
+    return i;
+}
+
+/// `s` up to a YAML comment (` #`), trimmed.
+fn stripComment(s: []const u8) []const u8 {
+    const end = if (std.mem.startsWith(u8, s, "#")) 0 else std.mem.indexOf(u8, s, " #") orelse s.len;
+    return std.mem.trim(u8, s[0..end], " \t\r");
+}
+
+/// `|`, `>`, `|-`, `>+2`, ... with nothing after but a comment.
+fn isBlockIndicator(value: []const u8) bool {
+    if (value.len == 0 or (value[0] != '|' and value[0] != '>')) return false;
+    var i: usize = 1;
+    while (i < value.len and (value[i] == '-' or value[i] == '+' or std.ascii.isDigit(value[i]))) i += 1;
+    return stripComment(value[i..]).len == 0;
+}
+
+/// Whether `s` names a `run:` key anywhere (`run:`, `"run":`, `'run':`).
+fn mentionsRun(s: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, s, i, "run")) |at| : (i = at + 1) {
+        if (at > 0 and isKeyChar(s[at - 1])) continue;
+        var j = at + "run".len;
+        if (j < s.len and (s[j] == '"' or s[j] == '\'')) j += 1;
+        if (j < s.len and s[j] == ':') return true;
+    }
+    return false;
+}
+
+fn isSeparator(cmd: []const u8, i: usize) bool {
+    return switch (cmd[i]) {
+        ';', '|' => true,
+        '&' => !(i > 0 and (cmd[i - 1] == '>' or cmd[i - 1] == '<')) and !(i + 1 < cmd.len and cmd[i + 1] == '>'),
+        else => false,
+    };
+}
+
+fn isAssignment(word: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, word, '=') orelse return false;
+    if (eq == 0 or std.ascii.isDigit(word[0])) return false;
+    for (word[0..eq]) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    return true;
+}
+
+/// One command (a piece between separators): its head must be `zig build`,
+/// or a pipe sink right after a single `|`.
+fn checkHead(arena: Allocator, out: *std.ArrayList(Located), text: []const u8, piece: []const u8, after_pipe: bool) !void {
+    var words = std.mem.tokenizeAny(u8, piece, " \t\r");
+    const head = while (words.next()) |w| {
+        if (!isAssignment(w)) break w;
+    } else return;
+    if (std.mem.eql(u8, head, "zig")) {
+        if (words.next()) |w| if (std.mem.eql(u8, w, "build")) return;
+    }
+    if (after_pipe) for (pipe_sinks) |sink| if (std.mem.eql(u8, head, sink)) return;
+    try parity(arena, out, text, offsetIn(text, head), "`{s}` runs outside `zig build`, so this CI check does not run in `zig build verify`.", .{std.mem.trim(u8, piece, " \t\r")});
+}
+
+/// One line of a `run:` value. `continued` is set when the previous line
+/// ended in `\`, so this line's first piece is not a command head.
+fn checkCommandLine(arena: Allocator, out: *std.ArrayList(Located), text: []const u8, cmd: []const u8, continued: *bool) !void {
+    const trimmed = std.mem.trim(u8, cmd, " \t\r");
+    if (trimmed.len == 0 or trimmed[0] == '#') {
+        continued.* = false;
+        return;
+    }
+    var start: usize = 0;
+    var after_pipe = false;
+    var first = true;
+    var i: usize = 0;
+    while (i <= cmd.len) : (i += 1) {
+        if (i < cmd.len and !isSeparator(cmd, i)) continue;
+        if (!(first and continued.*)) try checkHead(arena, out, text, cmd[start..i], after_pipe);
+        first = false;
+        if (i < cmd.len) {
+            const double = i + 1 < cmd.len and cmd[i + 1] == cmd[i];
+            after_pipe = cmd[i] == '|' and !double;
+            if (double) i += 1;
+        }
+        start = i + 1;
+    }
+    continued.* = std.mem.endsWith(u8, trimmed, "\\");
+}
+
+/// The text after `run:` on the key's line, when it is not a block scalar.
+fn checkRunValue(arena: Allocator, out: *std.ArrayList(Located), text: []const u8, raw: []const u8, key_at: usize) !void {
+    const value = std.mem.trim(u8, raw, " \t\r");
+    if (value.len == 0)
+        return parity(arena, out, text, key_at, "this `run:` has no value on its line (a value continued on the next lines), a form ci-parity does not read.", .{});
+    switch (value[0]) {
+        '"', '\'' => {
+            const q = value[0];
+            var i: usize = 1;
+            const close = while (i < value.len) : (i += 1) {
+                if (q == '"' and value[i] == '\\') {
+                    i += 1;
+                    continue;
+                }
+                if (value[i] != q) continue;
+                if (q == '\'' and i + 1 < value.len and value[i + 1] == '\'') {
+                    i += 1;
+                    continue;
+                }
+                break i;
+            } else return parity(arena, out, text, key_at, "this `run:` is a quoted value continued on the next line, a form ci-parity does not read.", .{});
+            if (stripComment(value[close + 1 ..]).len != 0)
+                return parity(arena, out, text, key_at, "this `run:` has text after its closing quote, a form ci-parity does not read.", .{});
+            var continued = false;
+            try checkCommandLine(arena, out, text, value[1..close], &continued);
+        },
+        '{', '[', '*', '&', '!' => return parity(arena, out, text, key_at, "this `run:` value is a flow collection, anchor, alias or tag (`{c}`), a form ci-parity does not read.", .{value[0]}),
+        else => {
+            var continued = false;
+            try checkCommandLine(arena, out, text, stripComment(value), &continued);
+        },
+    }
+}
+
+/// ci-parity: every command in ci.yml's `run:` values goes through
+/// `zig build` (rule in parity_reason).
+pub fn checkCiParity(arena: Allocator, repo: Repo, out: *std.ArrayList(Located)) !void {
+    const text = repo.ci_yml orelse {
+        try out.append(arena, .{ .path = ci_path, .v = .{
+            .rule = .@"ci-parity",
+            .line = 1,
+            .col = 1,
+            .what = ci_path ++ " does not exist, so nothing shows that CI runs only `zig build` steps.",
+            .reason = parity_reason,
+            .fix = "Restore " ++ ci_path ++ "; its checks belong in build.zig steps called as `zig build <step>`.",
+            .example = parity_example,
+        } });
+        return;
+    };
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |l| try lines.append(arena, l);
+    var n: usize = 0;
+    while (n < lines.items.len) : (n += 1) {
+        const line = lines.items[n];
+        var rest = std.mem.trimStart(u8, line, " ");
+        var item = false;
+        while (std.mem.startsWith(u8, rest, "- ") or std.mem.eql(u8, std.mem.trimEnd(u8, rest, " \t\r"), "-")) {
+            item = true;
+            rest = std.mem.trimStart(u8, rest[1..], " ");
+        }
+        if (std.mem.trim(u8, rest, " \t\r").len == 0 or rest[0] == '#') continue;
+        const key_col = line.len - rest.len;
+        const key_at = offsetIn(text, rest);
+        const klen = keyLen(rest) orelse {
+            if (!item)
+                try parity(arena, out, text, key_at, "this line is neither a key, a list item, a comment nor a block-scalar body (a continued value), so ci-parity cannot tell whether it is part of a `run:`.", .{})
+            else if (mentionsRun(stripComment(rest)))
+                try parity(arena, out, text, key_at, "this list item names `run:` in a form ci-parity does not read (a flow mapping or a quoted key).", .{});
+            continue;
+        };
+        const is_run = std.mem.eql(u8, rest[0..klen], "run");
+        const value = rest[klen + 1 ..];
+        if (isBlockIndicator(stripComment(value))) {
+            var continued = false;
+            var m = n + 1;
+            while (m < lines.items.len) : (m += 1) {
+                const body = lines.items[m];
+                if (std.mem.trim(u8, body, " \t\r").len == 0) continue;
+                if (body.len - std.mem.trimStart(u8, body, " ").len <= key_col) break;
+                if (is_run) try checkCommandLine(arena, out, text, body, &continued);
+            }
+            n = m - 1;
+            continue;
+        }
+        if (is_run) {
+            try checkRunValue(arena, out, text, value, key_at);
+        } else if (mentionsRun(stripComment(value))) {
+            try parity(arena, out, text, key_at, "this value names `run:` in a form ci-parity does not read (a flow mapping or a quoted key).", .{});
+        }
+    }
+}
+
 /// Violations, and per evidence-integrity check the sites an allow removed.
 pub const Result = struct { violations: []const Located, allowed: std.EnumArray(Check, usize) };
 
@@ -462,6 +682,7 @@ pub fn lintRepo(arena: Allocator, repo: Repo) !Result {
     try checkWiring(arena, repo, &out);
     try checkCitations(arena, repo, &out);
     try checkPathEvidence(arena, repo, &out, allowed.getPtr(.@"path-evidence"));
+    try checkCiParity(arena, repo, &out);
     return .{ .violations = out.items, .allowed = allowed };
 }
 
@@ -487,6 +708,7 @@ const empty_repo: Repo = .{
     .src_files = &.{},
     .test_files = &.{},
     .paths = &.{},
+    .ci_yml = "",
 };
 
 fn run(arena: Allocator, repo: Repo) ![]const Located {
@@ -709,4 +931,122 @@ test "evidence-integrity check 3: regression tests must read .origin or the regr
     try std.testing.expect(std.mem.indexOf(u8, got[6].v.what, "has no reason") != null);
     try std.testing.expect(std.mem.indexOf(u8, got[7].v.what, "has no reason") == null);
     try std.testing.expectEqual(@as(usize, 1), result.allowed.get(.@"path-evidence"));
+}
+
+/// The lines ci-parity reports for `yml` (every violation must be ci-parity).
+fn expectParity(expected_lines: []const usize, yml: ?[]const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var repo = empty_repo;
+    repo.ci_yml = yml;
+    const got = try run(arena_state.allocator(), repo);
+    errdefer for (got) |l| std.debug.print("{s}:{d}:{d} {s} {s}\n", .{ l.path, l.v.line, l.v.col, @tagName(l.v.rule), l.v.what });
+    try std.testing.expectEqual(expected_lines.len, got.len);
+    for (expected_lines, got) |line, l| {
+        try std.testing.expectEqual(lint.Rule.@"ci-parity", l.v.rule);
+        try std.testing.expectEqualStrings(ci_path, l.path);
+        try std.testing.expectEqual(line, l.v.line);
+    }
+}
+
+test "ci-parity: zig build steps, a tee sink and uses: steps pass" {
+    try expectParity(&.{},
+        \\jobs:
+        \\  test:
+        \\    steps:
+        \\      - uses: actions/checkout@abc # v4
+        \\        with:
+        \\          fetch-depth: 0 # a comment
+        \\      - name: Format check
+        \\        run: zig build fmt-check
+        \\      - name: Quoted
+        \\        run: "zig build test --summary all"
+        \\      - name: Budget
+        \\        shell: bash
+        \\        run: zig build compile-budget --summary all 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+        \\      - run: FOO=1 zig build pin-guard -Dpin-base=origin/${{ github.base_ref }} # trailing
+        \\      - run: |
+        \\          zig build lint
+        \\
+        \\          # a shell comment
+        \\          zig build validation \
+        \\            --summary all
+        \\      - run: >-
+        \\          zig build bench -Dsmoke
+    );
+}
+
+test "ci-parity: a one-line check outside zig build is detected" {
+    // The plan's example of a CI-only check.
+    try expectParity(&.{3},
+        \\steps:
+        \\  - run: zig build lint
+        \\  - run: grep -rn 'std\.debug\.print' src
+    );
+}
+
+test "ci-parity: a check on the second line of a block scalar is detected" {
+    try expectParity(&.{4},
+        \\steps:
+        \\  - run: |
+        \\      zig build test
+        \\      ./check.sh
+        \\  - run: zig build lint
+    );
+}
+
+test "ci-parity: a check chained to zig build is detected; tee only after a single |" {
+    try expectParity(&.{ 2, 3, 4, 5, 6 },
+        \\steps:
+        \\  - run: zig build test && ./check.sh
+        \\  - run: zig build test; zig fmt --check .
+        \\  - run: zig build test || echo ok
+        \\  - run: tee x
+        \\  - run: zig build test | grep -q passed
+    );
+}
+
+test "ci-parity: forms it cannot read are violations, and a missing ci.yml is one" {
+    // A continued value is reported at its `run:` line and again at the
+    // continuation line, which is neither a key nor a list item.
+    try expectParity(&.{ 2, 3, 4, 5, 6, 8, 9, 10 },
+        \\steps:
+        \\  - { name: x, run: grep x src }
+        \\  - run: *shared
+        \\  - "run": grep x src
+        \\  - run: "zig build test
+        \\      && grep x src"
+        \\  - run: zig build test
+        \\      && grep x src
+        \\  - run:
+        \\      grep x src
+    );
+    try expectParity(&.{1}, null);
+}
+
+test "ci-parity: limits as stated in its reason" {
+    // Not seen: an allowed command's arguments and the shell: key.
+    try expectParity(&.{},
+        \\steps:
+        \\  - run: zig build test -Dx=$(grep -c x src) `grep y src`
+        \\  - shell: grep x src {0}
+        \\    run: zig build test
+        \\  - run: X=$(./check.sh) zig build test
+    );
+    // Words are split at spaces, so an assignment whose value has a space
+    // leaves its next word as the head.
+    try expectParity(&.{2},
+        \\steps:
+        \\  - run: X=$(grep -c x src) zig build test
+    );
+    // A heredoc body, a shell function and eval are read as commands.
+    try expectParity(&.{ 4, 5, 6, 6, 6, 7 },
+        \\steps:
+        \\  - run: |
+        \\      zig build test <<EOF
+        \\      grep x src
+        \\      EOF
+        \\  - run: f() { zig build test; }; f
+        \\  - run: eval "grep x src"
+    );
 }

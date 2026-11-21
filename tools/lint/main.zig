@@ -4,12 +4,14 @@
 //! Usage: zigprop-lint [--warn] [--root <dir>] [--print-hashes]
 //!   --warn          report every rule as a warning and exit 0
 //!   --root <dir>    lint the repository at <dir> instead of . (its src, tests,
-//!                   build.zig, docs/verification.md and formal/manifest.zon)
+//!                   build.zig, docs/verification.md, formal/manifest.zon and
+//!                   .github/workflows/ci.yml)
 //!   --print-hashes  print the current formal/manifest.zon hashes first
 //!
 //! Rules and their configuration: core-is-pure, no-error-control-flow
 //! (error-contract.zon) and layer-order (layers.zon) walk src/ only;
-//! formal-drift (formal/manifest.zon) and evidence-integrity are in repo.zig.
+//! formal-drift (formal/manifest.zon), evidence-integrity and ci-parity are
+//! in repo.zig.
 //! Each rule's stage is in stages.zon.
 
 const std = @import("std");
@@ -17,14 +19,14 @@ const Token = std.zig.Token;
 const Allocator = std.mem.Allocator;
 const repo_rules = @import("repo.zig");
 
-pub const Rule = enum { @"core-is-pure", @"no-error-control-flow", @"layer-order", @"formal-drift", @"evidence-integrity" };
+pub const Rule = enum { @"core-is-pure", @"no-error-control-flow", @"layer-order", @"formal-drift", @"evidence-integrity", @"ci-parity" };
 pub const Stage = enum { warn, @"error" };
 
 const Entry = struct { name: []const u8, ref: []const u8 };
 const Contract = struct { comparable: []const Entry, returnable: []const Entry };
 const Upward = struct { from: []const u8, to: []const u8, in_fn: []const u8, ref: []const u8 };
 const Layers = struct { layers: []const []const u8, allowed_upward: []const Upward, external: []const []const u8 };
-const Stages = struct { @"core-is-pure": Stage, @"no-error-control-flow": Stage, @"layer-order": Stage, @"formal-drift": Stage, @"evidence-integrity": Stage };
+const Stages = struct { @"core-is-pure": Stage, @"no-error-control-flow": Stage, @"layer-order": Stage, @"formal-drift": Stage, @"evidence-integrity": Stage, @"ci-parity": Stage };
 
 pub const Config = struct { contract: Contract, layers: Layers };
 pub const default_config: Config = .{
@@ -124,7 +126,7 @@ const File = struct {
             .@"core-is-pure" => .{ pure_reason, pure_fix, pure_example },
             .@"no-error-control-flow" => .{ error_reason, error_fix, error_example },
             .@"layer-order" => .{ layer_reason, layer_fix, layer_example },
-            .@"formal-drift", .@"evidence-integrity" => unreachable, // repo.zig reports these
+            .@"formal-drift", .@"evidence-integrity", .@"ci-parity" => unreachable, // repo.zig reports these
         };
         try f.out.append(f.arena, .{
             .rule = rule,
@@ -483,6 +485,15 @@ fn readRepo(io: std.Io, arena: Allocator, root: []const u8) !repo_rules.Repo {
     std.mem.sort(repo_rules.SourceFile, src_files.items, {}, lessSource);
     std.mem.sort(repo_rules.SourceFile, test_files.items, {}, lessSource);
 
+    const ci_file = try std.fs.path.join(arena, &.{ root, repo_rules.ci_path });
+    const ci_yml: ?[]const u8 = std.Io.Dir.cwd().readFileAlloc(io, ci_file, arena, .limited(1 << 24)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => {
+            std.debug.print("zigprop-lint: cannot read {s}: {s}\n", .{ ci_file, @errorName(err) });
+            std.process.exit(2);
+        },
+    };
+
     const manifest_text = try readRootFile(io, arena, root, "formal/manifest.zon");
     var diag: std.zon.parse.Diagnostics = .{ .errors = &.{} };
     const manifest = std.zon.parse.fromSlice([]const repo_rules.ManifestItem, .{
@@ -502,6 +513,7 @@ fn readRepo(io: std.Io, arena: Allocator, root: []const u8) !repo_rules.Repo {
         .src_files = src_files.items,
         .test_files = test_files.items,
         .paths = paths.items,
+        .ci_yml = ci_yml,
     };
 }
 
