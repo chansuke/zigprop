@@ -49,7 +49,7 @@ const pure_reason = "The core never prints (design v0.3 §4.8, D26), and generat
 const pure_fix = "Return what you want to report inside `Report`; printing belongs in the *OrError wrappers in src/runner.zig; draw randomness through GenContext (range, index, boolean, length).";
 const pure_example = "runner.zig: `pub fn checkOrError(...) { ... const print = std.debug.print; ... }`";
 
-const error_reason = "Zig interns error names globally; a property or generator can return the same name, and this catch site cannot tell them apart (Sol M3 review, 271c891; design v0.3 §5.3).";
+const error_reason = "Zig interns error names globally; a property or generator can return the same name, and this catch site cannot tell them apart (Sol M3 review, 271c891; design v0.3 §5.3). Limits (structural audit, 2026-11-21): tokens of each src/ file are matched, test blocks included. Seen: every `error.X` and error set, and a comparison by `==`, `!=` or a switch prong of `error.X`, of a `const`/`var` alias of it, or of a member of a `const` error-set alias in the same block, also inside `@as`, `@intFromError` or `@errorCast`. Not seen: a comparison through a function call (`std.meta.eql`, `std.testing.expectEqual`), of `@errorName` strings, of an `@intFromError` value bound to a name, or of a member of an error set passed as a parameter, and an error made by `@errorFromInt`.";
 const error_fix = "Signal internal control flow with a flag or a tagged union, and return normally. Compare caught errors only against the `comparable` names in tools/lint/error-contract.zon; a new returnable name needs an entry there with its design section.";
 const error_example = "if (self.budget == 0) { self.exhausted = true; return .stop; }";
 
@@ -85,6 +85,14 @@ fn indexOfName(list: []const []const u8, name: []const u8) ?usize {
     for (list, 0..) |n, i| if (std.mem.eql(u8, n, name)) return i;
     return null;
 }
+
+/// A name bound to an error: `value` is X for `const e = error.X;`, null
+/// for a set `const E = error{...}`. Valid in tokens `from..to`.
+const Alias = struct { name: []const u8, value: ?[]const u8, from: usize, to: usize };
+/// An error value ending at token `end`, naming `name`.
+const ErrorRef = struct { end: usize, name: []const u8 };
+/// Builtins whose result compares like the error value they wrap.
+const error_wrappers = [_][]const u8{ "@as", "@intFromError", "@errorCast" };
 
 const File = struct {
     arena: Allocator,
@@ -257,14 +265,77 @@ const File = struct {
         }
     }
 
-    fn checkErrorNames(f: *File, contract: Contract) !void {
+    /// `const e = error.X;` (value alias of X) and `const E = error{...}`
+    /// (set alias), each valid in the block or container body around it.
+    /// Zig forbids shadowing, so inside that range the name means the alias.
+    fn collectAliases(f: *const File) ![]const Alias {
+        var out: std.ArrayList(Alias) = .empty;
         for (f.toks, 0..) |t, i| {
+            if (t.tag != .keyword_error or i < 3 or f.toks[i - 1].tag != .equal) continue;
+            var k = i - 2;
+            while (k > 0) : (k -= 1) switch (f.toks[k].tag) {
+                .keyword_const, .keyword_var, .semicolon, .l_brace, .r_brace => break,
+                else => {},
+            };
+            if ((f.toks[k].tag != .keyword_const and f.toks[k].tag != .keyword_var) or f.tag(k + 1) != .identifier) continue;
+            const value: ?[]const u8 = if (f.tag(i + 1) == .period and f.tag(i + 2) == .identifier and f.tag(i + 3) == .semicolon)
+                f.text(i + 2)
+            else if (f.tag(i + 1) == .l_brace) null else continue;
+            var depth: usize = 0;
+            var j = k;
+            const open: ?usize = while (j > 0) {
+                j -= 1;
+                switch (f.toks[j].tag) {
+                    .r_brace => depth += 1,
+                    .l_brace => if (depth == 0) break j else {
+                        depth -= 1;
+                    },
+                    else => {},
+                }
+            } else null;
+            try out.append(f.arena, .{
+                .name = f.text(k + 1),
+                .value = value,
+                .from = open orelse 0,
+                .to = if (open) |o| f.matchingClose(o, .l_brace, .r_brace) else f.toks.len,
+            });
+        }
+        return out.items;
+    }
+
+    /// An error value at token `j`: `error.X`, a value alias `e`, or a set
+    /// alias member `E.X`.
+    fn errorRef(f: *const File, aliases: []const Alias, j: usize) ?ErrorRef {
+        switch (f.tag(j)) {
+            .keyword_error => if (f.tag(j + 1) == .period and f.tag(j + 2) == .identifier) return .{ .end = j + 2, .name = f.text(j + 2) },
+            .identifier => {
+                if (j > 0 and f.toks[j - 1].tag == .period) return null;
+                for (aliases) |a| {
+                    if (j <= a.from or j >= a.to or !std.mem.eql(u8, a.name, f.text(j))) continue;
+                    if (a.value) |v| return .{ .end = j, .name = v };
+                    if (f.tag(j + 1) == .period and f.tag(j + 2) == .identifier) return .{ .end = j + 2, .name = f.text(j + 2) };
+                }
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn checkErrorNames(f: *File, contract: Contract) !void {
+        const aliases = try f.collectAliases();
+        for (f.toks, 0..) |t, i| {
+            if (t.tag == .identifier) {
+                const ref = f.errorRef(aliases, i) orelse continue;
+                if (f.isCompared(aliases, i, ref.end) and !contains(contract.comparable, ref.name))
+                    try f.report(.@"no-error-control-flow", t.loc.start, "`{s}` (error.{s}) is compared against a caught error.", .{ f.src[t.loc.start..f.toks[ref.end].loc.end], ref.name });
+                continue;
+            }
             if (t.tag != .keyword_error) continue;
             if (f.tag(i + 1) == .period and f.tag(i + 2) == .identifier) {
                 const name = f.text(i + 2);
                 if (!contains(contract.returnable, name) and !contains(contract.comparable, name))
                     try f.report(.@"no-error-control-flow", t.loc.start, "`error.{s}` is not in tools/lint/error-contract.zon.", .{name});
-                if (f.isCompared(i) and !contains(contract.comparable, name))
+                if (f.isCompared(aliases, i, i + 2) and !contains(contract.comparable, name))
                     try f.report(.@"no-error-control-flow", t.loc.start, "`error.{s}` is compared against a caught error.", .{name});
             } else if (f.tag(i + 1) == .l_brace) {
                 const close = f.matchingClose(i + 1, .l_brace, .r_brace);
@@ -278,18 +349,29 @@ const File = struct {
         }
     }
 
-    /// `x == error.N`, `error.N != x`, or a switch prong `error.A, error.N =>`.
-    fn isCompared(f: *const File, i: usize) bool {
-        if (i > 0 and (f.toks[i - 1].tag == .equal_equal or f.toks[i - 1].tag == .bang_equal)) return true;
-        var k = i + 3;
+    /// Whether the error value in tokens `start..end` is an operand of `==`
+    /// or `!=` (also inside `@as(T, v)`, `@intFromError(v)` or
+    /// `@errorCast(v)`), or an item of a switch prong `a, v, b =>` whose
+    /// items are all error values.
+    fn isCompared(f: *const File, aliases: []const Alias, start: usize, end: usize) bool {
+        var before: ?usize = if (start > 0) start - 1 else null;
+        var after = end + 1;
+        while (f.tag(after) == .r_paren) {
+            const open = f.matchingOpenParen(after) orelse break;
+            if (open == 0 or f.toks[open - 1].tag != .builtin or indexOfName(&error_wrappers, f.text(open - 1)) == null) break;
+            before = if (open >= 2) open - 2 else null;
+            after += 1;
+        }
+        if (before) |b| if (f.toks[b].tag == .equal_equal or f.toks[b].tag == .bang_equal) return true;
+        var k = after;
         switch (f.tag(k)) {
             .equal_equal, .bang_equal, .equal_angle_bracket_right => return true,
             else => {},
         }
         while (f.tag(k) == .comma) {
             if (f.tag(k + 1) == .equal_angle_bracket_right) return true;
-            if (f.tag(k + 1) != .keyword_error or f.tag(k + 2) != .period or f.tag(k + 3) != .identifier) return false;
-            k += 4;
+            const next = f.errorRef(aliases, k + 1) orelse return false;
+            k = next.end + 1;
         }
         return f.tag(k) == .equal_angle_bracket_right;
     }
@@ -694,6 +776,51 @@ test "no-error-control-flow: comparisons and unknown names are detected" {
     );
     try expectRules(&.{.@"no-error-control-flow"}, "src/gen.zig",
         \\fn h() error{ InvalidGeneration, Bogus }!void {}
+    );
+}
+
+test "no-error-control-flow: a comparison through an alias is detected" {
+    try expectRules(&.{.@"no-error-control-flow"}, "src/shrink.zig",
+        \\const e = error.OutOfMemory;
+        \\fn f(err: anyerror) bool { return err == e; }
+    );
+    try expectRules(&.{ .@"no-error-control-flow", .@"no-error-control-flow" }, "src/shrink.zig",
+        \\fn f(err: anyerror) u8 {
+        \\    const E = error{OutOfMemory};
+        \\    if (E.OutOfMemory != err) return 0;
+        \\    return switch (err) { E.OutOfMemory => 1, else => 2 };
+        \\}
+    );
+    // A comparable name may be compared through an alias too.
+    try expectRules(&.{}, "src/shrink.zig",
+        \\const e: anyerror = error.InvalidGeneration;
+        \\fn f(err: anyerror) bool { return err == e; }
+    );
+    // An alias is valid only in its block: another function's `e` is not it.
+    try expectRules(&.{}, "src/shrink.zig",
+        \\fn a() anyerror { const e = error.OutOfMemory; return e; }
+        \\fn b(x: u8, e: u8) bool { return x == e; }
+    );
+}
+
+test "no-error-control-flow: a comparison through @as or @intFromError is detected" {
+    try expectRules(&.{ .@"no-error-control-flow", .@"no-error-control-flow", .@"no-error-control-flow" }, "src/shrink.zig",
+        \\fn f(err: anyerror) bool {
+        \\    return err == @as(anyerror, error.OutOfMemory) or
+        \\        @as(anyerror, error.OutOfMemory) == err or
+        \\        @intFromError(err) == @intFromError(error.OutOfMemory);
+        \\}
+    );
+}
+
+test "no-error-control-flow: every item of a prong of error values is compared" {
+    try expectRules(&.{.@"no-error-control-flow"}, "src/shrink.zig",
+        \\const E = error{InvalidGeneration};
+        \\fn f(err: anyerror) u8 { return switch (err) { error.OutOfMemory, E.InvalidGeneration => 1, else => 2 }; }
+    );
+    // Prong values are not prong items.
+    try expectRules(&.{}, "src/runner.zig",
+        \\fn f(k: Kind) anyerror { return switch (k) { .x => error.InvalidConfig, .y => error.GaveUp }; }
     );
 }
 
