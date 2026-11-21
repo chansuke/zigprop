@@ -53,7 +53,7 @@ const error_reason = "Zig interns error names globally; a property or generator 
 const error_fix = "Signal internal control flow with a flag or a tagged union, and return normally. Compare caught errors only against the `comparable` names in tools/lint/error-contract.zon; a new returnable name needs an entry there with its design section.";
 const error_example = "if (self.budget == 0) { self.exhausted = true; return .stop; }";
 
-const layer_reason = "A lower layer must not depend on a higher one (shrink's acceptance must not depend on how runner reports; fingerprint must stay independent of gen for stale detection, design v0.3 §4.5); layers are source < fingerprint < gen < shrink < runner < root (tools/lint/layers.zon).";
+const layer_reason = "A lower layer must not depend on a higher one (shrink's acceptance must not depend on how runner reports; fingerprint must stay independent of gen for stale detection, design v0.3 §4.5); layers are source < fingerprint < gen < shrink < runner < root (tools/lint/layers.zon). Limits (structural audit, 2026-11-21): an `@import` of a .zig path is placed by its basename, a module name must be listed in `external`, and a .zon import is data and is not checked; the compiler accepts only a string literal operand. An allowed upward edge is matched by function name, and only while the file has exactly one function of that name; the enclosing container is not checked.";
 const layer_fix = "Pass what the lower layer needs as parameters, or move the shared type down and re-export it from the higher file. The only upward edges are the ones listed in tools/lint/layers.zon.";
 const layer_example = "runner.zig: `pub const ShrinkOutcome = shrink_mod.ShrinkOutcome;`";
 
@@ -399,7 +399,11 @@ const File = struct {
                     const lit = f.text(i + 2);
                     const target = lit[1 .. lit.len - 1];
                     if (indexOfName(layers.external, target) != null) continue;
-                    if (!std.mem.endsWith(u8, target, ".zig")) continue;
+                    if (std.mem.endsWith(u8, target, ".zon")) continue; // data, no code
+                    if (!std.mem.endsWith(u8, target, ".zig")) {
+                        try f.report(.@"layer-order", t.loc.start, "{s} imports the module \"{s}\", which is not in tools/lint/layers.zon external, so the layer it reaches cannot be checked (`root` is the compilation's root file, src/root.zig under `zig build test`).", .{ from, target });
+                        continue;
+                    }
                     const tbase = std.fs.path.basename(target);
                     const to = tbase[0 .. tbase.len - ".zig".len];
                     const from_i = indexOfName(layers.layers, from) orelse {
@@ -416,7 +420,15 @@ const File = struct {
                         if (std.mem.eql(u8, up.from, from) and std.mem.eql(u8, up.to, to) and
                             in_fn != null and std.mem.eql(u8, up.in_fn, in_fn.?)) break true;
                     } else false;
-                    if (allowed) continue;
+                    if (allowed) {
+                        var same_name: usize = 0;
+                        for (bodies) |b| if (b) |name| {
+                            if (std.mem.eql(u8, name, in_fn.?)) same_name += 1;
+                        };
+                        if (same_name == 1) continue;
+                        try f.report(.@"layer-order", t.loc.start, "{s} imports {s} in fn {s}, an allowed edge, but {s}.zig has {d} functions named {s}, so the edge names no single function.", .{ from, target, in_fn.?, from, same_name, in_fn.? });
+                        continue;
+                    }
                     const where = if (in_fn) |name| try std.fmt.allocPrint(f.arena, "in fn {s}", .{name}) else "at container level";
                     try f.report(.@"layer-order", t.loc.start, "{s} (layer {d}) imports {s} (layer {d}) {s}.", .{ from, from_i, target, to_i, where });
                 },
@@ -860,6 +872,31 @@ test "layer-order: upward imports are detected outside the listed functions" {
         .{ .from = "source", .to = "gen", .in_fn = "countElement", .ref = "test" },
     };
     try expectRulesWith(&.{.@"layer-order"}, "src/source.zig", source_like, cfg);
+}
+
+test "layer-order: a module import outside external is detected; .zon data is not" {
+    try expectRules(&.{ .@"layer-order", .@"layer-order", .@"layer-order" }, "src/shrink.zig",
+        \\const root = @import("root");
+        \\const zigprop = @import("zigprop");
+        \\const builtin = @import("builtin");
+    );
+    try expectRules(&.{}, "src/runner.zig",
+        \\const std = @import("std");
+        \\const file = @import("regressions.zon");
+    );
+}
+
+test "layer-order: an allowed edge needs a single function of that name" {
+    // A second `generate` in another container would inherit the edge by
+    // name; with two, neither import is allowed.
+    try expectRules(&.{ .@"layer-order", .@"layer-order" }, "src/source.zig", source_like ++
+        \\
+        \\const Other = struct {
+        \\    fn generate() void {
+        \\        _ = @import("gen.zig");
+        \\    }
+        \\};
+    );
 }
 
 test "allow: a reason silences one violation; a missing reason is a violation" {
