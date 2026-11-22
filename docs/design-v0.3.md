@@ -1185,3 +1185,21 @@ range and the gates are not moved after seeing the results. Reason: to
 measure how well gates that 10 seeds could not separate (T7,
 verification.md row 27) discriminate, and to warn early of a gradual
 loss of minimality (the K2 pattern).
+
+### A4 (2026-11-23, registered before the v0.4 sweep rows are implemented or run)
+
+The A3 nightly sweep (seeds 10 through 109) also runs the v0.4 targets
+**T10, T11, T12 and T14** (design v0.4 §4, D60), with the same
+`max_cases`, `shrink_budget` and default Limits as their seeds 0–9
+runs. As in A3, the sweep is a measurement, not a gate, and each
+target reports its primary success count divided by N, the number of
+seeds run: minimality (keys `[3,0,0,1,0,0,0]`) for T10; minimality
+(keys `[0,1,1000]`) and gate (2), agreement with the generator form,
+for T11; each row for T12; minimality (keys `[1,7,0]`) with P5
+enabled for T14. If any of these ratios is below 80%, the nightly job
+opens an issue, using the same `sweep-below-threshold:` line as A3.
+T10's B1, B2 and P5-disabled runs, T14's P5-disabled run and T13 print
+their ratios but do not open an issue. The threshold, the seed range
+and the gates are not moved after seeing the results. Reason: the
+v0.4 gates were frozen on 10 seeds, and the same measurement A3 makes
+for T1–T9e shows whether they hold on 100.
