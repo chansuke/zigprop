@@ -82,10 +82,90 @@ pub const AcceptEvent = struct {
 
 /// Per-attempt information handed to a property. Passed by pointer so
 /// later versions can add fields without changing the signature.
+///
+/// A property may draw further values through the methods (design
+/// v0.4 §2). Those draws are recorded after the value's draws in the
+/// same choice sequence, so they shrink, replay and persist with it.
+/// Determinism contract (D48): a property must be a deterministic
+/// function of its context, the values it draws and `allocator`; it
+/// must not carry state across evaluations, so build the system under
+/// test and any model afresh in every evaluation (D55).
 pub const Case = struct {
     /// The attempt arena (same lifetime as the generated value); use it
     /// for the system under test's scratch memory.
     allocator: Allocator,
+    /// Internal (no stability promise). Non-null only in a Case that
+    /// zigprop built; calling a method on any other Case is a bug and
+    /// trips the `.?` safety check.
+    impl: ?*CaseState = null,
+
+    /// Generates a T inside the property through the same path as the
+    /// value's generation (D43): same key annotations, spans, depth
+    /// and element budget. When the generation cannot complete (the
+    /// element budget ran out), the attempt becomes a discard (D42):
+    /// the returned error only carries the property out, and whatever
+    /// the property returns afterwards is not a verdict.
+    pub fn generate(self: *Case, comptime T: type) anyerror!T {
+        const st = self.impl.?;
+        return gen.generate(T, st.gen) catch |err| {
+            if (err == error.InvalidGeneration) {
+                st.discard = true;
+            } else {
+                // Anything else (arena OOM) is an infrastructure error
+                // (D42): the post-property check propagates it.
+                const src = st.gen.impl.src;
+                if (src.sticky_error == null) src.sticky_error = err;
+            }
+            return err;
+        };
+    }
+
+    /// Draws an index in `[0, n)` (D44; key = value). `n == 0` has
+    /// nothing to choose from: the attempt becomes a discard.
+    pub fn index(self: *Case, n: u64) anyerror!u64 {
+        const st = self.impl.?;
+        if (n == 0) return st.discardAttempt();
+        return st.gen.index(n);
+    }
+
+    /// Chooses one of the enabled tags of E (D44): the enabled tags in
+    /// declaration order, and exactly one `index(count)` draw, even
+    /// when only one tag is enabled. An empty set makes the attempt a
+    /// discard.
+    pub fn choose(self: *Case, comptime E: type, enabled: std.EnumSet(E)) anyerror!E {
+        const st = self.impl.?;
+        const names = @typeInfo(E).@"enum".field_names;
+        var count: u64 = 0;
+        inline for (names) |name| {
+            if (enabled.contains(@field(E, name))) count += 1;
+        }
+        if (count == 0) return st.discardAttempt();
+        const k = st.gen.index(count);
+        var i: u64 = 0;
+        inline for (names) |name| {
+            if (enabled.contains(@field(E, name))) {
+                if (i == k) return @field(E, name);
+                i += 1;
+            }
+        }
+        unreachable;
+    }
+};
+
+/// Internal state behind `Case.impl` (design v0.4 D39): lives in
+/// `evaluateAttempt`'s frame for one evaluation.
+pub const CaseState = struct {
+    /// The attempt's generation context (the value's own).
+    gen: *GenContext,
+    /// Set when a library-side generation could not complete inside
+    /// the property (D42). A flag, never an error name, decides the
+    /// discard: error names are interned globally.
+    discard: bool = false,
+
+    fn discardAttempt(self: *CaseState) error{InvalidGeneration} {
+        self.discard = true;
+        return error.InvalidGeneration;
+    }
 };
 
 /// The kind of a failure. Shrinking keeps it (D27): a candidate is
@@ -208,12 +288,20 @@ pub fn evaluateAttempt(
     // its re-recorded consumed sequence (padding included) is what
     // the acceptance rule compares (§6).
     if (src.exhausted and exhaustion_is_discard) return .discard;
-    var case: Case = .{ .allocator = attempt_allocator };
-    const failure: Failure = blk: {
-        const ok = property(ctx, &case, value) catch |err| break :blk .{ .returned_error = err };
-        if (ok) return .pass;
-        break :blk .returned_false;
-    };
+    var case_state: CaseState = .{ .gen = &gctx };
+    var case: Case = .{ .allocator = attempt_allocator, .impl = &case_state };
+    const verdict: ?Failure = if (property(ctx, &case, value)) |ok|
+        (if (ok) null else .returned_false)
+    else |err|
+        .{ .returned_error = err };
+    // Post-property checks (design v0.4 D41) outrank the verdict, in
+    // the same order as the checks above. A property that draws
+    // nothing changes none of these flags, so they repeat the checks
+    // above and its classification is unchanged.
+    if (src.sticky_error) |err| return err;
+    if (src.limit_exceeded or case_state.discard) return .discard;
+    if (src.exhausted and exhaustion_is_discard) return .discard;
+    const failure = verdict orelse return .pass;
     const choices = try result_allocator.dupe(Choice, src.recorded.items);
     errdefer result_allocator.free(choices);
     const keys = try result_allocator.dupe(u64, src.recorded_keys.items);

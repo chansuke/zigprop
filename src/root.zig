@@ -63,6 +63,7 @@ pub const internal = struct {
     pub const ShrinkPass = shrink_mod.ShrinkPass;
     pub const AcceptEvent = shrink_mod.AcceptEvent;
     pub const AcceptHook = shrink_mod.AcceptHook;
+    pub const CaseState = shrink_mod.CaseState;
     /// The structural hash, its serialization and the reachability
     /// predicates behind the fingerprint (design v0.3 §4.2-§4.3).
     pub const fingerprint = @import("fingerprint.zig");

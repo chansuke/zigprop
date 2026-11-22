@@ -4,7 +4,7 @@
     // Names a caught error may be compared against: only names that the
     // user's code returns on purpose, by contract.
     .comparable = .{
-        .{ .name = "InvalidGeneration", .ref = "design v2 §4.2; shrink.zig:194" },
+        .{ .name = "InvalidGeneration", .ref = "design v2 §4.2; shrink.zig evaluateAttempt; design v0.4 D42 (Case.generate)" },
     },
     // Names src/ may return (comparing against them is not allowed).
     .returnable = .{

@@ -910,6 +910,131 @@ fn runT14(allocator: std.mem.Allocator, seeds: Seeds) !void {
     out.print("T14 criterion (>=8 discovered AND >=8 minimal, control 10/10; P5-off <= 4/10 was the M0 condition): {s}\n", .{if (found >= 8 and minimal >= 8 and ctl == n) "MET" else "NOT MET"});
 }
 
+// T11: interactive draws whose type and count depend on an earlier
+// draw (design v0.4 §4 T11). The isolation control makes the same
+// draws in a custom generator (what v0.3.1 can write); its per-seed
+// shrunk choices and evaluation counts were recorded at M0.
+const T11Width = enum { wide, narrow };
+const T11V = struct { w: T11Width, xs: []const u16 };
+
+/// M0 reference (HEAD 1cab5f7, research note §4.3): per-seed shrink
+/// evaluations of the control; every seed shrank to t11_m0_choices.
+const t11_m0_evals = [_]usize{ 98, 89, 101, 101, 105, 92, 79, 119, 98, 115 };
+const t11_m0_choices = [_]zigprop.Choice{ .{ .bound = 2, .value = 0 }, .{ .bound = 33, .value = 1 }, .{ .bound = 4, .value = 3 }, .{ .bound = 65536, .value = 1000 } };
+
+fn t11Widen(allocator: std.mem.Allocator, n: []const u4) ![]const u16 {
+    const ws = try allocator.alloc(u16, n.len);
+    for (n, ws) |x, *y| y.* = x;
+    return ws;
+}
+
+fn genT11(_: u32, g: *zigprop.GenContext) anyerror!T11V {
+    const w = try g.generate(T11Width);
+    const xs: []const u16 = switch (w) {
+        .wide => try g.generate([]const u16),
+        .narrow => try t11Widen(g.allocator, try g.generate([]const u4)),
+    };
+    return .{ .w = w, .xs = xs };
+}
+
+fn t11Sum(xs: []const u16) u32 {
+    var s: u32 = 0;
+    for (xs) |x| s += x;
+    return s;
+}
+
+fn propT11Generator(limit: u32, _: *zigprop.Case, v: T11V) anyerror!bool {
+    return t11Sum(v.xs) < limit;
+}
+
+/// The interactive form: T = void, every draw inside the property.
+fn propT11(limit: u32, case: *zigprop.Case, _: void) anyerror!bool {
+    const w = try case.generate(T11Width);
+    const xs: []const u16 = switch (w) {
+        .wide => try case.generate([]const u16),
+        .narrow => try t11Widen(case.allocator, try case.generate([]const u4)),
+    };
+    return t11Sum(xs) < limit;
+}
+
+fn choicesEql(a: []const zigprop.Choice, b: []const zigprop.Choice) bool {
+    return std.mem.eql(u8, std.mem.sliceAsBytes(a), std.mem.sliceAsBytes(b));
+}
+
+/// The value and filtered keys of a T11 sequence, replayed through the
+/// generator form (the draws are the same in both forms).
+fn replayT11(arena: std.mem.Allocator, choices: []const zigprop.Choice) !struct { value: T11V, keys: []u64 } {
+    var src = zigprop.internal.Source.initReplay(arena, choices, 100_000);
+    var st: zigprop.internal.GenState = undefined;
+    var ctx = zigprop.internal.genContextForTest(&st, &src, arena, .{});
+    const v = try genT11(0, &ctx);
+    var keys: std.ArrayList(u64) = .empty;
+    for (src.recorded_keys.items, src.recorded_skip.items) |k, s| {
+        if (!s) try keys.append(arena, k);
+    }
+    return .{ .value = v, .keys = keys.items };
+}
+
+fn runT11(allocator: std.mem.Allocator, seeds: Seeds) !void {
+    const out = std.debug;
+    out.print("\n== T11 interactive draws (T = void; draw Width, then []const u16 or []const u4; fails iff sum >= 1000) ==\n", .{});
+    out.print("seed | interactive: cases, failure, shrunk keys, evals | generator form: evals, same shrunk choices and evals | entry replay\n", .{});
+    var found: usize = 0;
+    var minimal: usize = 0;
+    var same: usize = 0;
+    var control_m0: usize = 0;
+    var replayed: usize = 0;
+    var ctl: usize = 0;
+    var evals: usize = 0;
+    for (seeds.from..seeds.to + 1) |seed| {
+        const cfg: zigprop.Config = .{ .seed = seed, .max_cases = 200 };
+        var r = try zigprop.checkWith(allocator, void, u32, 1000, null, propT11, cfg);
+        defer r.deinit();
+        var g = try zigprop.checkWith(allocator, T11V, u32, 1000, genT11, propT11Generator, cfg);
+        defer g.deinit();
+        if (g == .failed and seeds.isDefault() and seed < t11_m0_evals.len and
+            g.failed.shrink_evaluations == t11_m0_evals[seed] and choicesEql(g.failed.shrunk_choices, &t11_m0_choices))
+            control_m0 += 1;
+        switch (r) {
+            .failed => |f| {
+                found += 1;
+                evals += f.shrink_evaluations;
+                var arena_state = std.heap.ArenaAllocator.init(allocator);
+                defer arena_state.deinit();
+                const a = arena_state.allocator();
+                const rep = try replayT11(a, f.shrunk_choices);
+                const is_min = std.mem.eql(u64, rep.keys, &.{ 0, 1, 1000 });
+                if (is_min) minimal += 1;
+                const is_same = g == .failed and choicesEql(f.shrunk_choices, g.failed.shrunk_choices) and
+                    f.shrink_evaluations == g.failed.shrink_evaluations;
+                if (is_same) same += 1;
+                // Gate (4): the printed entry, parsed back, replays to the
+                // same failure.
+                const entry = try t8Entry(a, &f);
+                const entries = [_]zigprop.Regression{entry};
+                var e = try zigprop.checkWith(allocator, void, u32, 1000, null, propT11, .{ .seed = 1234, .max_cases = 1, .regressions = &entries, .regression_id = entry.id });
+                defer e.deinit();
+                const ok = e == .failed and e.failed.origin == .regression and e.failed.origin.regression.stale == null and
+                    e.failed.failure.eql(f.failure);
+                if (ok) replayed += 1;
+                out.print("{d:>4} | cases {d}, {s}, keys {any}{s}, evals {d} | generator: evals {d}, same {} | entry fails again: {}\n", .{
+                    seed,                             f.origin.random.attempt_index + 1, if (f.failure == .returned_false) "returned_false" else "returned_error", rep.keys,
+                    if (is_min) " (minimal)" else "", f.shrink_evaluations,              if (g == .failed) g.failed.shrink_evaluations else 0,                     is_same,
+                    ok,
+                });
+            },
+            else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
+        }
+        var c = try zigprop.checkWith(allocator, void, u32, 1 << 20, null, propT11, cfg);
+        defer c.deinit();
+        if (std.meta.activeTag(c) == .passed) ctl += 1;
+    }
+    const n = seeds.count();
+    out.print("T11: discovered {d}/{d}, minimal [0,1,1000] {d}/{d}, shrunk choices and evals identical to the generator form {d}/{d}, entry replays fail with the same kind {d}/{d}, control (sum >= 2^20) passed {d}/{d}\n", .{ found, n, minimal, found, same, n, replayed, found, ctl, n });
+    out.print("T11 measurements: total evals {d}; generator form reproduces the M0 reference {d}/{d}\n", .{ evals, control_m0, n });
+    out.print("T11 criterion (gates 1, 2, 4: >=8 discovered AND >=8 minimal, identical to the generator form 10/10, entry replays 10/10, control 10/10; gates 3, 5 at M5): {s}\n", .{if (found >= 8 and minimal >= 8 and same == n and replayed == n and ctl == n) "MET" else "NOT MET"});
+}
+
 // ---------------------------------------------------------------------
 
 /// The inclusive seed range every target runs (`--seeds <from>..<to>`).
@@ -1554,6 +1679,7 @@ pub fn main(init: std.process.Init) !void {
         // them to the sweep (design v0.4 D60).
         out.print("\n== v0.4 targets ==\n", .{});
         try runT14(allocator, seeds);
+        try runT11(allocator, seeds);
         return;
     }
 
