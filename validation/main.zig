@@ -1035,6 +1035,304 @@ fn runT11(allocator: std.mem.Allocator, seeds: Seeds) !void {
     out.print("T11 criterion (gates 1, 2, 4: >=8 discovered AND >=8 minimal, identical to the generator form 10/10, entry replays 10/10, control 10/10; gates 3, 5 at M5): {s}\n", .{if (found >= 8 and minimal >= 8 and same == n and replayed == n and ctl == n) "MET" else "NOT MET"});
 }
 
+// T10: model-based test of a slot map with generation-checked handles
+// (design v0.4 §4 T10). SUT and model are the M0 harness's
+// (research note §3); the property is the D54 recipe.
+const SlotMap = struct {
+    const cap = 4;
+    gens: [cap]u32 = .{ 1, 1, 1, 1 },
+    occupied: [cap]bool = .{ false, false, false, false },
+    values: [cap]u8 = .{ 0, 0, 0, 0 },
+    /// Slots ever handed out (new slots are used in order).
+    used: usize = 0,
+    /// LIFO free list.
+    free: [cap]usize = undefined,
+    free_len: usize = 0,
+    /// Mutant: remove does not bump the generation.
+    mutant: bool,
+
+    fn insert(self: *SlotMap, v: u8) ?u64 {
+        var slot: usize = undefined;
+        if (self.free_len > 0) {
+            self.free_len -= 1;
+            slot = self.free[self.free_len];
+        } else if (self.used < cap) {
+            slot = self.used;
+            self.used += 1;
+        } else return null;
+        self.occupied[slot] = true;
+        self.values[slot] = v;
+        return (@as(u64, self.gens[slot]) << 32) | slot;
+    }
+
+    fn lookup(self: *const SlotMap, h: u64) ?usize {
+        const slot = h & 0xffff_ffff;
+        if (slot >= self.used) return null;
+        if (!self.occupied[slot] or self.gens[slot] != h >> 32) return null;
+        return @intCast(slot);
+    }
+
+    fn remove(self: *SlotMap, h: u64) bool {
+        const s = self.lookup(h) orelse return false;
+        self.occupied[s] = false;
+        if (!self.mutant) self.gens[s] += 1;
+        self.free[self.free_len] = s;
+        self.free_len += 1;
+        return true;
+    }
+
+    fn get(self: *const SlotMap, h: u64) ?u8 {
+        const s = self.lookup(h) orelse return null;
+        return self.values[s];
+    }
+};
+
+const SlotModel = struct {
+    /// Live handles in insertion order (removal keeps the order).
+    live: std.ArrayList(u64) = .empty,
+    live_vals: std.ArrayList(u8) = .empty,
+    /// Every handle ever issued, in issue order.
+    issued: std.ArrayList(u64) = .empty,
+
+    fn liveIndex(self: *const SlotModel, h: u64) ?usize {
+        return std.mem.indexOfScalar(u64, self.live.items, h);
+    }
+
+    fn wasIssued(self: *const SlotModel, h: u64) bool {
+        return std.mem.indexOfScalar(u64, self.issued.items, h) != null;
+    }
+
+    fn insert(self: *SlotModel, a: std.mem.Allocator, h: u64, v: u8) !void {
+        try self.live.append(a, h);
+        try self.live_vals.append(a, v);
+        try self.issued.append(a, h);
+    }
+
+    fn remove(self: *SlotModel, h: u64) void {
+        const i = self.liveIndex(h).?;
+        _ = self.live.orderedRemove(i);
+        _ = self.live_vals.orderedRemove(i);
+    }
+
+    fn get(self: *const SlotModel, h: u64) ?u8 {
+        const i = self.liveIndex(h) orelse return null;
+        return self.live_vals.items[i];
+    }
+};
+
+const T10Cfg = struct { mutant: bool };
+const T10Op = enum { insert, remove, get };
+
+/// The v0.4 form (D54): choose an enabled operation, then draw its
+/// payload against the model's state; each postcondition has its own
+/// error name (D56).
+fn propT10(cfg: *const T10Cfg, case: *zigprop.Case, _: void) anyerror!bool {
+    const a = case.allocator;
+    var sut: SlotMap = .{ .mutant = cfg.mutant };
+    var model: SlotModel = .{};
+    var s = case.steps(16);
+    while (s.next()) {
+        var en: std.EnumSet(T10Op) = .empty;
+        if (model.live.items.len < SlotMap.cap) en.insert(.insert);
+        if (model.live.items.len > 0) en.insert(.remove);
+        if (model.issued.items.len > 0) en.insert(.get);
+        switch (try case.choose(T10Op, en)) {
+            .insert => {
+                const v = try case.generate(u8);
+                const h = sut.insert(v).?;
+                if (model.wasIssued(h)) return error.HandleReused;
+                try model.insert(a, h, v);
+            },
+            .remove => {
+                const h = model.live.items[try case.index(model.live.items.len)];
+                if (!sut.remove(h)) return error.RemoveMismatch;
+                model.remove(h);
+            },
+            .get => {
+                const h = model.issued.items[try case.index(model.issued.items.len)];
+                if (!std.meta.eql(sut.get(h), model.get(h))) return error.GetMismatch;
+            },
+        }
+    }
+    return true;
+}
+
+// The v0.3 encodings the design compares against (§4 T10, M0 §4.2).
+const T10CmdB1 = union(enum) { insert: u8, remove: u64, get: u64 };
+const T10CmdB2 = union(enum) { insert: u8, remove: u8, get: u8 };
+const t10_limits: zigprop.Limits = .{ .max_len = 16 };
+/// M0 reference (HEAD 1cab5f7, research note §4.2): B2's per-seed
+/// shrink evaluations.
+const t10_m0_b2_evals = [_]usize{ 131, 153, 131, 130, 127, 143, 140, 145, 127, 147 };
+
+fn t10Insert(sut: *SlotMap, model: *SlotModel, a: std.mem.Allocator, v: u8) !void {
+    if (model.live.items.len == SlotMap.cap) return;
+    const h = sut.insert(v).?;
+    if (model.wasIssued(h)) return error.HandleReused;
+    try model.insert(a, h, v);
+}
+
+fn t10Remove(sut: *SlotMap, model: *SlotModel, h: u64) !void {
+    const expected = model.liveIndex(h) != null;
+    if (sut.remove(h) != expected) return error.RemoveMismatch;
+    if (expected) model.remove(h);
+}
+
+fn t10Get(sut: *SlotMap, model: *SlotModel, h: u64) !void {
+    if (!std.meta.eql(sut.get(h), model.get(h))) return error.GetMismatch;
+}
+
+/// B1: blind handles; an invalid handle is a no-op for both sides.
+fn propT10B1(cfg: *const T10Cfg, case: *zigprop.Case, cmds: []const T10CmdB1) anyerror!bool {
+    var sut: SlotMap = .{ .mutant = cfg.mutant };
+    var model: SlotModel = .{};
+    for (cmds) |c| switch (c) {
+        .insert => |v| try t10Insert(&sut, &model, case.allocator, v),
+        .remove => |h| try t10Remove(&sut, &model, h),
+        .get => |h| try t10Get(&sut, &model, h),
+    };
+    return true;
+}
+
+/// B2: payloads read against the state; inapplicable commands skip.
+fn propT10B2(cfg: *const T10Cfg, case: *zigprop.Case, cmds: []const T10CmdB2) anyerror!bool {
+    var sut: SlotMap = .{ .mutant = cfg.mutant };
+    var model: SlotModel = .{};
+    for (cmds) |c| switch (c) {
+        .insert => |v| try t10Insert(&sut, &model, case.allocator, v),
+        .remove => |idx| {
+            const n = model.live.items.len;
+            if (n > 0) try t10Remove(&sut, &model, model.live.items[idx % n]);
+        },
+        .get => |idx| {
+            const n = model.issued.items.len;
+            if (n > 0) try t10Get(&sut, &model, model.issued.items[idx % n]);
+        },
+    };
+    return true;
+}
+
+fn failureName(f: zigprop.Failure) []const u8 {
+    return switch (f) {
+        .returned_false => "returned_false",
+        .returned_error => |e| @errorName(e),
+    };
+}
+
+/// The non-skipped keys of one T10 evaluation replaying `choices`,
+/// with the failure it produced (null when it passed or discarded).
+fn t10Replay(arena: std.mem.Allocator, cfg: *const T10Cfg, choices: []const zigprop.Choice) !struct { keys: []u64, failed: bool } {
+    var src = zigprop.internal.Source.initReplay(arena, choices, 100_000);
+    const r = try zigprop.internal.evaluateAttempt(arena, void, *const T10Cfg, cfg, null, propT10, &src, arena, .{}, false);
+    var keys: std.ArrayList(u64) = .empty;
+    for (src.recorded_keys.items, src.recorded_skip.items) |k, skip| {
+        if (!skip) try keys.append(arena, k);
+    }
+    return .{ .keys = keys.items, .failed = r == .fail };
+}
+
+fn runT10(seeds: Seeds) !void {
+    const out = std.debug;
+    out.print("\n== T10 slot map with generation-checked handles (T = void; steps(16), choose Op, payload against the model; mutant: remove keeps the generation) ==\n", .{});
+    out.print("seed | cases, failure, shrunk keys, evals, outcome | hook: acceptances, kind violations, rerun reproduces | P5 off (measurement): keys, evals | B2 (measurement): evals\n", .{});
+    const expected_failure: zigprop.Failure = .{ .returned_error = error.HandleReused };
+    const expected_keys = [_]u64{ 3, 0, 0, 1, 0, 0, 0 };
+    const mutant: T10Cfg = .{ .mutant = true };
+    const correct: T10Cfg = .{ .mutant = false };
+    var found: usize = 0;
+    var minimal: usize = 0;
+    var kind_ok: usize = 0;
+    var accepts: usize = 0;
+    var violations: usize = 0;
+    var reproduces: usize = 0;
+    var leaks: usize = 0;
+    var ctl: usize = 0;
+    var ctl_leaks: usize = 0;
+    var ctl_discards: usize = 0;
+    var evals: usize = 0;
+    var off_min: usize = 0;
+    var off_evals: usize = 0;
+    var b1_found: usize = 0;
+    var b2_found: usize = 0;
+    var b2_min: usize = 0;
+    var b2_evals: usize = 0;
+    var b2_m0: usize = 0;
+    for (seeds.from..seeds.to + 1) |seed| {
+        const cfg: zigprop.Config = .{ .seed = seed, .max_cases = 200 };
+        var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        {
+            const gpa = dbg.allocator();
+            var r = try zigprop.checkWith(gpa, void, *const T10Cfg, &mutant, null, propT10, cfg);
+            defer r.deinit();
+            var b2 = try zigprop.checkWith(gpa, []const T10CmdB2, *const T10Cfg, &mutant, null, propT10B2, .{ .seed = seed, .max_cases = 200, .limits = t10_limits });
+            defer b2.deinit();
+            var b2_evals_seed: usize = 0;
+            if (b2 == .failed) {
+                b2_found += 1;
+                b2_evals_seed = b2.failed.shrink_evaluations;
+                b2_evals += b2_evals_seed;
+                if (seeds.isDefault() and seed < t10_m0_b2_evals.len and b2_evals_seed == t10_m0_b2_evals[seed]) b2_m0 += 1;
+                var arena_state = std.heap.ArenaAllocator.init(gpa);
+                defer arena_state.deinit();
+                const rep = try replayWithKeys([]const T10CmdB2, arena_state.allocator(), b2.failed.shrunk_choices, t10_limits);
+                if (std.mem.eql(u64, rep.keys, &expected_keys)) b2_min += 1;
+            }
+            var b1 = try zigprop.checkWith(gpa, []const T10CmdB1, *const T10Cfg, &mutant, null, propT10B1, .{ .seed = seed, .max_cases = 200, .limits = t10_limits });
+            defer b1.deinit();
+            if (b1 == .failed) b1_found += 1;
+            switch (r) {
+                .failed => |f| {
+                    found += 1;
+                    evals += f.shrink_evaluations;
+                    if (f.failure.eql(expected_failure)) kind_ok += 1;
+                    var arena_state = std.heap.ArenaAllocator.init(gpa);
+                    defer arena_state.deinit();
+                    const a = arena_state.allocator();
+                    const rep = try t10Replay(a, &mutant, f.shrunk_choices);
+                    const is_min = std.mem.eql(u64, rep.keys, &expected_keys);
+                    if (is_min) minimal += 1;
+                    // Re-run the shrink from the confirmed failing sequence
+                    // with the acceptance hook (as T9e), and with P5 off.
+                    var src = zigprop.internal.Source.initReplay(a, f.choices, 100_000);
+                    const first = try zigprop.internal.evaluateAttempt(a, void, *const T10Cfg, &mutant, null, propT10, &src, a, .{}, false);
+                    const ff = first.fail;
+                    var mon: KindMonitor = .{ .expected = expected_failure };
+                    const sr = try zigprop.internal.shrinkWith(a, void, *const T10Cfg, &mutant, null, propT10, f.failure, .{}, 2000, ff.choices, ff.keys, ff.skips, ff.spans, ff.draws, .{ .on_accept = mon.hook() });
+                    const same = choicesEql(sr.choices, f.shrunk_choices) and sr.evaluations == f.shrink_evaluations;
+                    if (same) reproduces += 1;
+                    accepts += mon.accepts;
+                    violations += mon.violations;
+                    const off = try zigprop.internal.shrinkWith(a, void, *const T10Cfg, &mutant, null, propT10, f.failure, .{}, 2000, ff.choices, ff.keys, ff.skips, ff.spans, ff.draws, .{ .passes = .{ .p5 = false } });
+                    const off_rep = try t10Replay(a, &mutant, off.choices);
+                    const off_is_min = std.mem.eql(u64, off_rep.keys, &expected_keys);
+                    if (off_is_min) off_min += 1;
+                    off_evals += off.evaluations;
+                    out.print("{d:>4} | cases {d}, {s}, keys {any}{s}, evals {d}, {s} | hook: {d} acceptances, {d} violations, reproduces {} | P5 off: keys {any}{s}, evals {d} | B2: evals {d}\n", .{
+                        seed,        f.origin.random.attempt_index + 1, failureName(f.failure), rep.keys,     if (is_min) " (minimal)" else "",     f.shrink_evaluations, @tagName(f.shrink_outcome),
+                        mon.accepts, mon.violations,                    same,                   off_rep.keys, if (off_is_min) " (minimal)" else "", off.evaluations,      b2_evals_seed,
+                    });
+                },
+                else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
+            }
+        }
+        if (dbg.deinit() == .leak) leaks += 1;
+        var dbg_c: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        {
+            var c = try zigprop.checkWith(dbg_c.allocator(), void, *const T10Cfg, &correct, null, propT10, cfg);
+            defer c.deinit();
+            if (c == .passed) {
+                ctl += 1;
+                ctl_discards += c.passed.discards;
+            }
+        }
+        if (dbg_c.deinit() == .leak) ctl_leaks += 1;
+    }
+    const n = seeds.count();
+    out.print("T10: discovered {d}/{d}, minimal keys [3,0,0,1,0,0,0] {d}/{d}, failure = returned_error(HandleReused) {d}/{d}, kind kept on {d} acceptances with {d} violations, hook rerun reproduces {d}/{d}, leaking seeds {d}, control passed {d}/{d} (leaking seeds {d})\n", .{ found, n, minimal, found, kind_ok, found, accepts, violations, reproduces, found, leaks, ctl, n, ctl_leaks });
+    out.print("T10 measurements: total evals {d}; P5 off: minimal {d}/{d}, total evals {d}; B1 discovered {d}/{d} (M0: 0/10); B2 discovered {d}/{d}, minimal {d}/{d}, total evals {d}, evals equal to M0 {d}/{d}; control discards (Limits) {d}\n", .{ evals, off_min, found, off_evals, b1_found, n, b2_found, n, b2_min, b2_found, b2_evals, b2_m0, n, ctl_discards });
+    out.print("T10 criterion (>=8 discovered AND >=8 minimal, HandleReused on every discovery AND 0 kind violations, 0 leaks, control 10/10; display and reproduced at M5): {s}\n", .{if (found >= 8 and minimal >= 8 and kind_ok == found and violations == 0 and leaks == 0 and ctl == n and ctl_leaks == 0) "MET" else "NOT MET"});
+}
+
 // ---------------------------------------------------------------------
 
 /// The inclusive seed range every target runs (`--seeds <from>..<to>`).
@@ -1680,6 +1978,7 @@ pub fn main(init: std.process.Init) !void {
         out.print("\n== v0.4 targets ==\n", .{});
         try runT14(allocator, seeds);
         try runT11(allocator, seeds);
+        try runT10(seeds);
         return;
     }
 

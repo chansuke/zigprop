@@ -161,6 +161,56 @@ pub const Case = struct {
         }
         unreachable;
     }
+
+    /// Repeats a block of draws (D45): one length draw in `[0, max]`,
+    /// then one step per `next()` that returns true. Each step is a
+    /// slice element to the shrinker (the existing `.element` span of
+    /// that length draw), so deleting steps works like deleting
+    /// elements. When the element budget runs out, `next()` returns
+    /// false and the attempt becomes a discard (D42).
+    pub fn steps(self: *Case, max: usize) Steps {
+        const st = self.impl.?;
+        const length_pos = st.position();
+        const len = st.gen.length(max);
+        return .{ .st = st, .len = len, .length_pos = length_pos, .outer_step = st.step };
+    }
+
+    pub const Steps = struct {
+        st: *CaseState,
+        len: usize,
+        length_pos: usize,
+        /// The enclosing loop's step, restored when this loop ends.
+        outer_step: ?usize,
+        done: usize = 0,
+        /// Stack depth of this loop's open step span; null when none
+        /// is open (or the nesting limit left it unrecorded).
+        open: ?usize = null,
+
+        /// Closes the previous step and starts the next one; false when
+        /// the drawn number of steps has run.
+        pub fn next(self: *Steps) bool {
+            const st = self.st;
+            if (self.open) |depth| {
+                st.closeSteps(depth);
+                self.open = null;
+            }
+            if (self.done == self.len) return self.finish();
+            st.gen.countElement() catch {
+                st.discard = true;
+                return self.finish();
+            };
+            self.open = st.openStep(self.length_pos);
+            st.step = self.done;
+            st.logDraw(st.position(), .step_marker);
+            self.done += 1;
+            return true;
+        }
+
+        fn finish(self: *Steps) bool {
+            self.st.step = self.outer_step;
+            return false;
+        }
+    };
 };
 
 /// The type-erased regeneration function for T (design v0.4 D46): one
@@ -205,6 +255,33 @@ pub const CaseState = struct {
     /// the property (D42). A flag, never an error name, decides the
     /// discard: error names are interned globally.
     discard: bool = false,
+    /// The current step of the innermost `Case.steps` loop (D45).
+    step: ?usize = null,
+    /// Span indices of the open step spans, innermost last (D45).
+    open_steps: [max_step_nesting]usize = undefined,
+    open_len: usize = 0,
+
+    /// Deeper step loops record no span: efficiency only (D18).
+    const max_step_nesting = 8;
+
+    /// Opens a step's element span; returns its stack depth, or null
+    /// past the nesting limit.
+    fn openStep(self: *CaseState, length_pos: usize) ?usize {
+        if (self.open_len == max_step_nesting) return null;
+        self.open_steps[self.open_len] = self.gen.impl.src.beginSpan(.{ .element = .{ .length_pos = length_pos } });
+        self.open_len += 1;
+        return self.open_len - 1;
+    }
+
+    /// Closes the open step spans from stack depth `depth` up, at the
+    /// current recorded position (also those of an abandoned inner
+    /// loop).
+    fn closeSteps(self: *CaseState, depth: usize) void {
+        while (self.open_len > depth) {
+            self.open_len -= 1;
+            self.gen.impl.src.endSpan(self.open_steps[self.open_len]);
+        }
+    }
 
     fn discardAttempt(self: *CaseState) error{InvalidGeneration} {
         self.discard = true;
@@ -216,7 +293,7 @@ pub const CaseState = struct {
     }
 
     fn logDraw(self: *CaseState, start: usize, shown: DrawEntry.Shown) void {
-        self.gen.impl.src.recordDraw(.{ .start = start, .end = self.position(), .shown = shown });
+        self.gen.impl.src.recordDraw(.{ .start = start, .end = self.position(), .step = self.step, .shown = shown });
     }
 };
 
@@ -352,7 +429,9 @@ pub fn evaluateAttempt(
     // Post-property checks (design v0.4 D41) outrank the verdict, in
     // the same order as the checks above. A property that draws
     // nothing changes none of these flags, so they repeat the checks
-    // above and its classification is unchanged.
+    // above and its classification is unchanged. A step left open by
+    // an early return ends where the property stopped drawing.
+    case_state.closeSteps(0);
     if (src.sticky_error) |err| return err;
     if (src.limit_exceeded or case_state.discard) return .discard;
     if (src.exhausted and exhaustion_is_discard) return .discard;

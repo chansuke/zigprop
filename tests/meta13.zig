@@ -456,3 +456,109 @@ test "draw log: a property that draws nothing logs nothing" {
     defer testing.allocator.free(r.draws);
     try testing.expectEqual(@as(usize, 0), r.draws.len);
 }
+
+// ---------------------------------------------------------------------
+// Steps (D45)
+// ---------------------------------------------------------------------
+
+fn propStepsUntil7(_: void, case: *zigprop.Case, _: void) anyerror!bool {
+    var s = case.steps(4);
+    while (s.next()) {
+        if (try case.generate(u8) == 7) return false;
+    }
+    return true;
+}
+
+test "steps: one length draw, one element span per step, an early return closes the open span" {
+    // Three steps drawn (length 3 of [0, 4]); the second step's u8 is 7,
+    // so the property returns inside step 1 and step 2 never runs.
+    const values = [_]Choice{ .{ .bound = 5, .value = 3 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 7 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 2 } };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var src = zigprop.internal.Source.initReplay(arena_state.allocator(), &values, 100_000);
+    const result = try zigprop.internal.evaluateAttempt(testing.allocator, void, void, {}, null, propStepsUntil7, &src, arena_state.allocator(), .{}, false);
+    try testing.expect(result == .fail);
+    const f = result.fail;
+    defer {
+        testing.allocator.free(f.choices);
+        testing.allocator.free(f.keys);
+        testing.allocator.free(f.skips);
+        testing.allocator.free(f.spans);
+        testing.allocator.free(f.draws);
+    }
+    // One length draw, keyed by its value, then two u8 pairs.
+    try testing.expectEqualSlices(Choice, values[0..5], f.choices);
+    try testing.expectEqual(@as(u64, 3), f.keys[0]);
+    // One element span per step that ran, tied to the length draw. The
+    // open step 1 ends where the property stopped (position 5), not
+    // empty at its start.
+    var elements: std.ArrayList(zigprop.internal.Span) = .empty;
+    defer elements.deinit(testing.allocator);
+    for (f.spans) |sp| {
+        if (sp.info == .element) try elements.append(testing.allocator, sp);
+    }
+    try testing.expectEqual(@as(usize, 2), elements.items.len);
+    for (elements.items) |sp| try testing.expectEqual(@as(usize, 0), sp.info.element.length_pos);
+    try testing.expectEqual(@as(usize, 1), elements.items[0].start);
+    try testing.expectEqual(@as(usize, 3), elements.items[0].end);
+    try testing.expectEqual(@as(usize, 3), elements.items[1].start);
+    try testing.expectEqual(@as(usize, 5), elements.items[1].end);
+    // The draw log: a marker per step, then the step's draws, tagged
+    // with the step number.
+    try testing.expectEqual(@as(usize, 4), f.draws.len);
+    try testing.expect(f.draws[0].shown == .step_marker);
+    try testing.expect(f.draws[1].shown == .regenerate);
+    try testing.expect(f.draws[2].shown == .step_marker);
+    try testing.expect(f.draws[3].shown == .regenerate);
+    for (f.draws, [_]usize{ 0, 0, 1, 1 }) |d, step| try testing.expectEqual(@as(?usize, step), d.step);
+    try testing.expectEqual(@as(usize, 3), f.draws[3].start);
+    try testing.expectEqual(@as(usize, 5), f.draws[3].end);
+}
+
+fn propStepsThenIndex(_: void, case: *zigprop.Case, _: void) anyerror!bool {
+    var s = case.steps(4);
+    while (s.next()) _ = try case.generate(u8);
+    _ = try case.index(2);
+    return false;
+}
+
+test "steps: a finished loop closes its last step and draws after it belong to no step" {
+    const values = [_]Choice{ .{ .bound = 5, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 9 }, .{ .bound = 2, .value = 1 } };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var src = zigprop.internal.Source.initReplay(arena_state.allocator(), &values, 100_000);
+    const result = try zigprop.internal.evaluateAttempt(testing.allocator, void, void, {}, null, propStepsThenIndex, &src, arena_state.allocator(), .{}, false);
+    try testing.expect(result == .fail);
+    const f = result.fail;
+    defer {
+        testing.allocator.free(f.choices);
+        testing.allocator.free(f.keys);
+        testing.allocator.free(f.skips);
+        testing.allocator.free(f.spans);
+        testing.allocator.free(f.draws);
+    }
+    try testing.expectEqualSlices(Choice, &values, f.choices);
+    var n_elements: usize = 0;
+    for (f.spans) |sp| {
+        if (sp.info != .element) continue;
+        n_elements += 1;
+        try testing.expectEqual(@as(usize, 1), sp.start);
+        try testing.expectEqual(@as(usize, 3), sp.end);
+    }
+    try testing.expectEqual(@as(usize, 1), n_elements);
+    try testing.expectEqual(@as(usize, 3), f.draws.len);
+    try testing.expectEqual(@as(?usize, null), f.draws[2].step);
+    try testing.expectEqual(@as(u64, 1), f.draws[2].shown.index);
+}
+
+test "steps: running out of the element budget ends the loop and discards the attempt" {
+    // Three steps drawn, but the budget allows two elements: next()
+    // returns false at the third step and the attempt is a discard
+    // although the property returns false.
+    const values = [_]Choice{ .{ .bound = 5, .value = 3 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 1 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 2 }, .{ .bound = 2, .value = 0 } };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var src = zigprop.internal.Source.initReplay(arena_state.allocator(), &values, 100_000);
+    const result = try zigprop.internal.evaluateAttempt(testing.allocator, void, void, {}, null, propStepsThenIndex, &src, arena_state.allocator(), .{ .max_total_elements = 2 }, false);
+    try testing.expect(result == .discard);
+}
