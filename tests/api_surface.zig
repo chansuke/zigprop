@@ -92,3 +92,37 @@ test "api surface: Config and Limits fields and defaults" {
         "max_draws (defaulted)", "max_depth (defaulted)",
     }, comptime fieldSurface(zigprop.Limits));
 }
+
+// v0.4 (design v0.4 D61): the Case methods, the report's payload and the
+// fingerprint are promised surface from v0.4 on.
+
+test "api surface: Case declarations and fields" {
+    try expectSurface("Case pub declarations", &.{ "generate", "index", "choose", "steps", "Steps" }, comptime declNames(zigprop.Case));
+    try expectSurface("Case fields", &.{ "allocator (required)", "impl (defaulted)" }, comptime fieldSurface(zigprop.Case));
+}
+
+test "api surface: Report.Failed and Fingerprint fields" {
+    try expectSurface("Report.Failed fields", &.{
+        "allocator (required)",      "origin (required)",         "failure (required)",
+        "choices (required)",        "shrunk_choices (required)", "fingerprint (required)",
+        "original_value (required)", "shrunk_value (required)",   "shrink_evaluations (required)",
+        "shrink_outcome (required)", "regressions (required)",    "original_draws (defaulted)",
+        "shrunk_draws (defaulted)",  "reproduced (defaulted)",
+    }, comptime fieldSurface(zigprop.Report.Failed));
+    try expectSurface("Fingerprint fields", &.{
+        "type_hash (required)",        "max_len (required)",         "max_depth (required)",
+        "custom_generator (required)", "property_draws (defaulted)",
+    }, comptime fieldSurface(zigprop.Fingerprint));
+}
+
+test "api surface: checkWith's signature" {
+    // A generic function's type equals no hand-written function type in
+    // Zig 0.17.1, so the signature is pinned by its type name (v0.4 M0
+    // research note §4.4-4, alternative 1). The name also carries
+    // internal file and declaration names: an internal rename turns this
+    // red too, and then only the expected string needs updating.
+    try std.testing.expectEqualStrings(
+        "fn (mem.Allocator, comptime type, comptime type, anytype, anytype, anytype, runner.Config) @typeInfo(@typeInfo(@TypeOf(runner.checkWith)).@\"fn\".return_type.?).error_union.error_set!runner.Report",
+        @typeName(@TypeOf(zigprop.checkWith)),
+    );
+}

@@ -66,6 +66,8 @@ pub const internal = struct {
     pub const AcceptHook = shrink_mod.AcceptHook;
     pub const CaseState = shrink_mod.CaseState;
     pub const evaluateAttempt = shrink_mod.evaluateAttempt;
+    /// The `drawn:` section of a printed failure (design v0.4 D47).
+    pub const writeDrawn = runner_mod.writeDrawn;
     /// The structural hash, its serialization and the reachability
     /// predicates behind the fingerprint (design v0.3 §4.2-§4.3).
     pub const fingerprint = @import("fingerprint.zig");

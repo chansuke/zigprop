@@ -289,3 +289,80 @@ test "zon: tests/regressions.zon imports as a RegressionFile" {
     defer r.deinit();
     try std.testing.expect(r == .passed);
 }
+
+// ---------------------------------------------------------------------
+// Values drawn inside the property (design v0.4 D46-D48)
+// ---------------------------------------------------------------------
+
+const Op = enum { push, pop };
+
+/// Draws an index outside any step, then per step an Op and a u8;
+/// fails once the pushed values reach 10.
+fn pushesReach10(_: void, case: *Case, _: void) anyerror!bool {
+    _ = try case.index(3);
+    var s = case.steps(4);
+    var total: usize = 0;
+    while (s.next()) {
+        const op = try case.choose(Op, .full);
+        const v = try case.generate(u8);
+        if (op == .push) total += v;
+        if (total >= 10) return false;
+    }
+    return true;
+}
+
+test "drawn: the report owns the drawn values, grouped by step, and reproduces the failure" {
+    const gpa = std.testing.allocator;
+    var r = try zigprop.checkWith(gpa, void, void, {}, null, pushesReach10, .{});
+    // std.testing.allocator fails the test on a leak: deinit frees the
+    // drawn texts and both slices.
+    defer r.deinit();
+    const f = r.failed;
+    try std.testing.expect(f.original_draws.len >= 3);
+    try std.testing.expectEqual(@as(?bool, true), f.reproduced);
+    // The shrunk failure: index 0 outside the steps, then one step that
+    // pushes 10. The texts were rebuilt after every attempt arena died.
+    const want = [_]struct { step: ?usize, text: []const u8 }{ .{ .step = null, .text = "0" }, .{ .step = 0, .text = ".push" }, .{ .step = 0, .text = "10" } };
+    try std.testing.expectEqual(want.len, f.shrunk_draws.len);
+    for (f.shrunk_draws, want) |d, w| {
+        try std.testing.expectEqual(w.step, d.step);
+        try std.testing.expectEqualStrings(w.text, d.text);
+    }
+}
+
+test "drawn: the printed section groups a step's draws and marks the last step" {
+    const gpa = std.testing.allocator;
+    const draws = [_]zigprop.Report.Failed.Drawn{
+        .{ .step = null, .text = @constCast("0") },
+        .{ .step = 0, .text = @constCast(".push") },
+        .{ .step = 0, .text = @constCast("3") },
+        .{ .step = 1, .text = @constCast(".push") },
+        .{ .step = 1, .text = @constCast("10") },
+    };
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try zigprop.internal.writeDrawn(&out.writer, &draws);
+    try std.testing.expectEqualStrings(
+        \\  drawn:
+        \\    0
+        \\    step 0: .push, 3
+        \\    step 1: .push, 10   <- failed here
+        \\
+    , out.written());
+    // A property that drew nothing prints no section.
+    out.clearRetainingCapacity();
+    try zigprop.internal.writeDrawn(&out.writer, &.{});
+    try std.testing.expectEqualStrings("", out.written());
+}
+
+test "drawn: a property that draws nothing has no drawn values and no reproduction check" {
+    var r = try zigprop.checkCustom(std.testing.allocator, u32, singleDraw, smallOnly, .{});
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.failed.original_draws.len);
+    try std.testing.expectEqual(@as(usize, 0), r.failed.shrunk_draws.len);
+    try std.testing.expectEqual(@as(?bool, null), r.failed.reproduced);
+}
+
+test "drawn: the OrError wrapper prints a drawing property's failure" {
+    try std.testing.expectError(error.PropertyFailed, zigprop.checkWithOrError(std.testing.allocator, void, void, {}, null, pushesReach10, .{}));
+}

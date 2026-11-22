@@ -25,6 +25,7 @@ const Choice = source.Choice;
 const GenContext = source.GenContext;
 const Limits = source.Limits;
 const Source = source.Source;
+const DrawEntry = source.DrawEntry;
 
 pub const Case = shrink_mod.Case;
 pub const Failure = shrink_mod.Failure;
@@ -149,6 +150,21 @@ pub const Report = union(enum) {
         shrink_evaluations: usize,
         shrink_outcome: ShrinkOutcome,
         regressions: RegressionSummary,
+        /// The values the property drew itself, in draw order, rebuilt
+        /// from the choices without calling the property (design v0.4
+        /// D46, D47; result-owned). Empty when the property drew
+        /// nothing.
+        original_draws: []Drawn = &.{},
+        shrunk_draws: []Drawn = &.{},
+        /// Non-null only when the property drew values on the shrunk
+        /// sequence: whether one more replay of that sequence, under
+        /// the regression phase's conditions, failed the same way and
+        /// consumed it all (D48).
+        reproduced: ?bool = null,
+
+        /// One drawn value: the step of `Case.steps` it was drawn in
+        /// (null outside any step) and its display.
+        pub const Drawn = struct { step: ?usize, text: []u8 };
 
         /// One line to paste into `tests/regressions.zon`'s `.entries`:
         /// `.{ .id = "…", .gen_version = …, .fingerprint = .{ … },
@@ -161,8 +177,9 @@ pub const Report = union(enum) {
             errdefer out.deinit();
             const w = &out.writer;
             const fp = self.fingerprint;
-            try w.print(".{{ .id = \"{f}\", .gen_version = {d}, .fingerprint = .{{ .type_hash = 0x{x:0>16}, .max_len = {d}, .max_depth = {d}, .custom_generator = {} }}, .choices = .{{", .{
-                std.zig.fmtString(id), gen.generator_version, fp.type_hash, fp.max_len, fp.max_depth, fp.custom_generator,
+            try w.print(".{{ .id = \"{f}\", .gen_version = {d}, .fingerprint = .{{ .type_hash = 0x{x:0>16}, .max_len = {d}, .max_depth = {d}, .custom_generator = {}{s} }}, .choices = .{{", .{
+                std.zig.fmtString(id),                                     gen.generator_version, fp.type_hash, fp.max_len, fp.max_depth, fp.custom_generator,
+                if (fp.property_draws) ", .property_draws = true" else "",
             });
             const multi = self.shrunk_choices.len > 1;
             for (self.shrunk_choices, 0..) |c, i| {
@@ -183,6 +200,8 @@ pub const Report = union(enum) {
                 f.allocator.free(f.original_value);
                 f.allocator.free(f.shrunk_value);
                 f.allocator.free(f.regressions.stale);
+                freeDraws(f.allocator, f.original_draws);
+                freeDraws(f.allocator, f.shrunk_draws);
             },
         }
         self.* = undefined;
@@ -327,6 +346,13 @@ fn printFailure(f: *const Report.Failed, config: Config) void {
     }
     print("  original: {s}\n", .{f.original_value});
     print("  shrunk:   {s} ({s}, {d} evaluations)\n", .{ f.shrunk_value, @tagName(f.shrink_outcome), f.shrink_evaluations });
+    var drawn: std.Io.Writer.Allocating = .init(f.allocator);
+    defer drawn.deinit();
+    if (writeDrawn(&drawn.writer, f.shrunk_draws)) |_| {
+        print("{s}", .{drawn.written()});
+    } else |err| {
+        print("  drawn: (unavailable: error.{s})\n", .{@errorName(err)});
+    }
     const id = config.regression_id orelse "<set Config.regression_id>";
     print("  regression entry (paste into regressions.zon .entries):\n", .{});
     if (f.regressionEntry(f.allocator, id)) |entry| {
@@ -337,9 +363,91 @@ fn printFailure(f: *const Report.Failed, config: Config) void {
     }
 }
 
+/// The `drawn:` section (design v0.4 D47): consecutive draws of one
+/// step on one line, the last step marked as where the property failed.
+/// Nothing when the property drew nothing.
+pub fn writeDrawn(out: *std.Io.Writer, draws: []const Report.Failed.Drawn) !void {
+    if (draws.len == 0) return;
+    var last_stepped: ?usize = null;
+    for (draws, 0..) |d, i| {
+        if (d.step != null) last_stepped = i;
+    }
+    try out.print("  drawn:\n", .{});
+    var i: usize = 0;
+    while (i < draws.len) {
+        const step = draws[i].step;
+        if (step) |s| try out.print("    step {d}: ", .{s}) else try out.print("    ", .{});
+        var j = i;
+        while (j < draws.len and std.meta.eql(draws[j].step, step)) : (j += 1) {
+            try out.print("{s}{s}", .{ if (j == i) "" else ", ", draws[j].text });
+        }
+        const failed_here = if (last_stepped) |l| i <= l and l < j else false;
+        try out.print("{s}\n", .{if (failed_here) "   <- failed here" else ""});
+        i = j;
+    }
+}
+
+fn freeDraws(allocator: Allocator, draws: []Report.Failed.Drawn) void {
+    for (draws) |d| allocator.free(d.text);
+    allocator.free(draws);
+}
+
 // ---------------------------------------------------------------------
 // The core
 // ---------------------------------------------------------------------
+
+/// Rebuilds the display of a draw log from the choices it indexes
+/// (design v0.4 D46): `Case.generate` values are regenerated from their
+/// own positions, indices and tags are written out, and step markers
+/// only delimit steps. Result-owned; nothing points into an arena.
+fn renderDraws(allocator: Allocator, limits: Limits, choices: []const Choice, log: []const DrawEntry) ![]Report.Failed.Drawn {
+    var out: std.ArrayList(Report.Failed.Drawn) = .empty;
+    errdefer {
+        for (out.items) |d| allocator.free(d.text);
+        out.deinit(allocator);
+    }
+    for (log) |e| {
+        const text = switch (e.shown) {
+            .step_marker => continue,
+            .regenerate => |regen| try regen(allocator, limits, choices[e.start..e.end]),
+            .index => |k| try std.fmt.allocPrint(allocator, "{d}", .{k}),
+            .tag => |name| try std.fmt.allocPrint(allocator, ".{s}", .{name}),
+        };
+        out.append(allocator, .{ .step = e.step, .text = text }) catch |err| {
+            allocator.free(text);
+            return err;
+        };
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// The reproduction check (design v0.4 D48): replays `choices` once
+/// under the regression phase's conditions (bound-0 values, exhaustion
+/// is a discard) and reports whether it failed with `failure` and
+/// consumed the whole sequence. Not counted in the shrink budget.
+fn reproduces(
+    allocator: Allocator,
+    comptime T: type,
+    comptime Ctx: type,
+    ctx: Ctx,
+    generator: ?GeneratorWith(Ctx, T),
+    property: PropertyWith(Ctx, T),
+    limits: Limits,
+    failure: Failure,
+    choices: []const Choice,
+) !bool {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const replay = try aa.alloc(Choice, choices.len);
+    for (choices, replay) |c, *r| r.* = .{ .bound = 0, .value = c.value };
+    var src = Source.initReplay(aa, replay, limits.max_draws);
+    const result = try shrink_mod.evaluateAttempt(aa, T, Ctx, ctx, generator, property, &src, aa, limits, true);
+    return switch (result) {
+        .fail => |f| f.failure.eql(failure) and src.pos == choices.len,
+        .pass, .discard => false,
+    };
+}
 
 /// Regenerates the value of `choices` in a fresh arena and formats it
 /// (design v0.3 §5.5, D30): `{f}` when T declares `format`, `{any}`
@@ -392,41 +500,86 @@ fn makeFailed(
     allocator.free(fail.keys);
     allocator.free(fail.skips);
     allocator.free(fail.spans);
-    // The draw logs are internal until the report shows them (v0.4 M5).
-    allocator.free(fail.draws);
-    allocator.free(sr.draws);
-    const original = renderValue(allocator, T, Ctx, ctx, generator, config.limits, fail.choices) catch |err| {
-        allocator.free(fail.choices);
-        allocator.free(sr.choices);
+    var parts: FailedParts = .{
+        .allocator = allocator,
+        .choices = fail.choices,
+        .shrunk_choices = sr.choices,
+        .original_log = fail.draws,
+        .shrunk_log = sr.draws,
+    };
+    // Reproduction check (D48): only when the shrunk sequence drew, so
+    // a property that draws nothing runs exactly as in v0.3.
+    const reproduced: ?bool = if (sr.draws.len == 0) null else reproduces(allocator, T, Ctx, ctx, generator, property, config.limits, fail.failure, sr.choices) catch |err| {
+        parts.free();
         return err;
     };
-    const shrunk = renderValue(allocator, T, Ctx, ctx, generator, config.limits, sr.choices) catch |err| {
-        allocator.free(fail.choices);
-        allocator.free(sr.choices);
-        allocator.free(original);
+    parts.original_draws = renderDraws(allocator, config.limits, fail.choices, fail.draws) catch |err| {
+        parts.free();
+        return err;
+    };
+    parts.shrunk_draws = renderDraws(allocator, config.limits, sr.choices, sr.draws) catch |err| {
+        parts.free();
+        return err;
+    };
+    parts.original_value = renderValue(allocator, T, Ctx, ctx, generator, config.limits, fail.choices) catch |err| {
+        parts.free();
+        return err;
+    };
+    parts.shrunk_value = renderValue(allocator, T, Ctx, ctx, generator, config.limits, sr.choices) catch |err| {
+        parts.free();
         return err;
     };
     const regressions = summary.finish(allocator) catch |err| {
-        allocator.free(fail.choices);
-        allocator.free(sr.choices);
-        allocator.free(original);
-        allocator.free(shrunk);
+        parts.free();
         return err;
     };
+    // A property that drew values keeps every limit in its fingerprint
+    // (D51): a draw inside it may reach any type.
+    const report_fp = if (fail.draws.len == 0) fp else fingerprint.ofPropertyDraws(T, config.limits, generator != null);
+    allocator.free(fail.draws);
+    allocator.free(sr.draws);
     return .{ .failed = .{
         .allocator = allocator,
         .origin = origin,
         .failure = fail.failure,
         .choices = fail.choices,
         .shrunk_choices = sr.choices,
-        .fingerprint = fp,
-        .original_value = original,
-        .shrunk_value = shrunk,
+        .fingerprint = report_fp,
+        .original_value = parts.original_value,
+        .shrunk_value = parts.shrunk_value,
         .shrink_evaluations = sr.evaluations,
         .shrink_outcome = sr.outcome,
         .regressions = regressions,
+        .original_draws = parts.original_draws,
+        .shrunk_draws = parts.shrunk_draws,
+        .reproduced = reproduced,
     } };
 }
+
+/// What `makeFailed` owns until the report takes it over, freed in one
+/// place on an error path (no errdefer: the values move into the report).
+const FailedParts = struct {
+    allocator: Allocator,
+    choices: []Choice,
+    shrunk_choices: []Choice,
+    original_log: []DrawEntry,
+    shrunk_log: []DrawEntry,
+    original_draws: []Report.Failed.Drawn = &.{},
+    shrunk_draws: []Report.Failed.Drawn = &.{},
+    original_value: []u8 = &.{},
+    shrunk_value: []u8 = &.{},
+
+    fn free(self: *const FailedParts) void {
+        self.allocator.free(self.choices);
+        self.allocator.free(self.shrunk_choices);
+        self.allocator.free(self.original_log);
+        self.allocator.free(self.shrunk_log);
+        freeDraws(self.allocator, self.original_draws);
+        freeDraws(self.allocator, self.shrunk_draws);
+        self.allocator.free(self.original_value);
+        self.allocator.free(self.shrunk_value);
+    }
+};
 
 /// The regression phase's counts while the run is in progress; the
 /// stale list is borrowed until `finish` copies it into the report.
@@ -486,7 +639,10 @@ fn run(
             }
             // Row 2: a stored fingerprint that differs -> not replayed.
             if (entry.fingerprint) |stored| {
-                const mismatch = fingerprint.compare(stored, fp);
+                // An entry from a property that drew values is compared
+                // with every limit kept, the way it was recorded (D51).
+                const current = if (stored.property_draws) fingerprint.ofPropertyDraws(T, config.limits, generator != null) else fp;
+                const mismatch = fingerprint.compare(stored, current);
                 if (mismatch.any()) {
                     try stale.append(allocator, .{ .index = idx, .reason = .fingerprint_mismatch, .mismatch = mismatch });
                     continue;

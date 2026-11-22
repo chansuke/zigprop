@@ -20,6 +20,9 @@ pub const Fingerprint = struct {
     max_depth: u8,
     /// Recorded with a custom generator; then nothing is normalized.
     custom_generator: bool,
+    /// Recorded from a property that drew values itself (design v0.4
+    /// D51); then nothing is normalized either.
+    property_draws: bool = false,
 };
 
 /// Which fingerprint fields differ (design v0.3 §4.5 row 2).
@@ -54,6 +57,18 @@ pub fn of(comptime T: type, limits: Limits, custom_generator: bool) Fingerprint 
         .max_len = if (keep_len) limits.max_len else 0,
         .max_depth = if (keep_depth) @intCast(limits.max_depth) else 0,
         .custom_generator = custom_generator,
+    };
+}
+
+/// The fingerprint of a run whose property draws values itself (design
+/// v0.4 D51): the property may draw any type, so every limit is kept.
+pub fn ofPropertyDraws(comptime T: type, limits: Limits, custom_generator: bool) Fingerprint {
+    return .{
+        .type_hash = typeHash(T),
+        .max_len = limits.max_len,
+        .max_depth = @intCast(limits.max_depth),
+        .custom_generator = custom_generator,
+        .property_draws = true,
     };
 }
 

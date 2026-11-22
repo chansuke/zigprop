@@ -982,6 +982,8 @@ fn runT11(allocator: std.mem.Allocator, seeds: Seeds) !void {
     var found: usize = 0;
     var minimal: usize = 0;
     var same: usize = 0;
+    var shown: usize = 0;
+    var reproduced: usize = 0;
     var control_m0: usize = 0;
     var replayed: usize = 0;
     var ctl: usize = 0;
@@ -1008,6 +1010,16 @@ fn runT11(allocator: std.mem.Allocator, seeds: Seeds) !void {
                 const is_same = g == .failed and choicesEql(f.shrunk_choices, g.failed.shrunk_choices) and
                     f.shrink_evaluations == g.failed.shrink_evaluations;
                 if (is_same) same += 1;
+                // Gate (3): the drawn texts are the generator form's w and
+                // xs, each formatted with std.fmt.
+                const want_w = try std.fmt.allocPrint(a, "{any}", .{rep.value.w});
+                const want_xs = try std.fmt.allocPrint(a, "{any}", .{rep.value.xs});
+                const d = f.shrunk_draws;
+                const shown_ok = d.len == 2 and d[0].step == null and d[1].step == null and
+                    std.mem.eql(u8, d[0].text, want_w) and std.mem.eql(u8, d[1].text, want_xs);
+                if (shown_ok) shown += 1;
+                // Gate (5).
+                if (f.reproduced == true) reproduced += 1;
                 // Gate (4): the printed entry, parsed back, replays to the
                 // same failure.
                 const entry = try t8Entry(a, &f);
@@ -1017,10 +1029,11 @@ fn runT11(allocator: std.mem.Allocator, seeds: Seeds) !void {
                 const ok = e == .failed and e.failed.origin == .regression and e.failed.origin.regression.stale == null and
                     e.failed.failure.eql(f.failure);
                 if (ok) replayed += 1;
-                out.print("{d:>4} | cases {d}, {s}, keys {any}{s}, evals {d} | generator: evals {d}, same {} | entry fails again: {}\n", .{
+                out.print("{d:>4} | cases {d}, {s}, keys {any}{s}, evals {d} | generator: evals {d}, same {} | entry fails again: {} | drawn {s} {s} (matches {}), reproduced {?}\n", .{
                     seed,                             f.origin.random.attempt_index + 1, if (f.failure == .returned_false) "returned_false" else "returned_error", rep.keys,
                     if (is_min) " (minimal)" else "", f.shrink_evaluations,              if (g == .failed) g.failed.shrink_evaluations else 0,                     is_same,
-                    ok,
+                    ok,                               if (d.len > 0) d[0].text else "-", if (d.len > 1) d[1].text else "-",                                        shown_ok,
+                    f.reproduced,
                 });
             },
             else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
@@ -1031,8 +1044,9 @@ fn runT11(allocator: std.mem.Allocator, seeds: Seeds) !void {
     }
     const n = seeds.count();
     out.print("T11: discovered {d}/{d}, minimal [0,1,1000] {d}/{d}, shrunk choices and evals identical to the generator form {d}/{d}, entry replays fail with the same kind {d}/{d}, control (sum >= 2^20) passed {d}/{d}\n", .{ found, n, minimal, found, same, n, replayed, found, ctl, n });
+    out.print("T11: drawn texts match the generator form's values {d}/{d}, reproduced == true {d}/{d}\n", .{ shown, found, reproduced, found });
     out.print("T11 measurements: total evals {d}; generator form reproduces the M0 reference {d}/{d}\n", .{ evals, control_m0, n });
-    out.print("T11 criterion (gates 1, 2, 4: >=8 discovered AND >=8 minimal, identical to the generator form 10/10, entry replays 10/10, control 10/10; gates 3, 5 at M5): {s}\n", .{if (found >= 8 and minimal >= 8 and same == n and replayed == n and ctl == n) "MET" else "NOT MET"});
+    out.print("T11 criterion (gates 1-5: >=8 discovered AND >=8 minimal, identical to the generator form 10/10, drawn texts 10/10, entry replays 10/10, reproduced 10/10, control 10/10): {s}\n", .{if (found >= 8 and minimal >= 8 and same == n and shown == n and replayed == n and reproduced == n and ctl == n) "MET" else "NOT MET"});
 }
 
 // T10: model-based test of a slot map with generation-checked handles
@@ -1120,25 +1134,46 @@ const SlotModel = struct {
     }
 };
 
-const T10Cfg = struct { mutant: bool };
+/// How the property draws an insert's value: `base` is T10's; the
+/// others are T12's changed properties (rows c and d).
+const T10Variant = enum { base, insert_draws_bool, insert_draws_nothing };
+const T10Cfg = struct { mutant: bool, variant: T10Variant = .base };
 const T10Op = enum { insert, remove, get };
+/// T12 row (e): the same operations declared in another order.
+const T10OpReordered = enum { insert, get, remove };
+
+fn propT10(cfg: *const T10Cfg, case: *zigprop.Case, _: void) anyerror!bool {
+    return t10Steps(T10Op, cfg, case);
+}
+
+fn propT10Reordered(cfg: *const T10Cfg, case: *zigprop.Case, _: void) anyerror!bool {
+    return t10Steps(T10OpReordered, cfg, case);
+}
 
 /// The v0.4 form (D54): choose an enabled operation, then draw its
 /// payload against the model's state; each postcondition has its own
 /// error name (D56).
-fn propT10(cfg: *const T10Cfg, case: *zigprop.Case, _: void) anyerror!bool {
+fn t10Steps(comptime Op: type, cfg: *const T10Cfg, case: *zigprop.Case) anyerror!bool {
     const a = case.allocator;
     var sut: SlotMap = .{ .mutant = cfg.mutant };
     var model: SlotModel = .{};
     var s = case.steps(16);
     while (s.next()) {
-        var en: std.EnumSet(T10Op) = .empty;
+        var en: std.EnumSet(Op) = .empty;
         if (model.live.items.len < SlotMap.cap) en.insert(.insert);
         if (model.live.items.len > 0) en.insert(.remove);
         if (model.issued.items.len > 0) en.insert(.get);
-        switch (try case.choose(T10Op, en)) {
+        switch (try case.choose(Op, en)) {
             .insert => {
-                const v = try case.generate(u8);
+                const v: u8 = switch (cfg.variant) {
+                    .base => try case.generate(u8),
+                    .insert_draws_bool => blk: {
+                        const v = try case.generate(u8);
+                        _ = try case.generate(bool);
+                        break :blk v;
+                    },
+                    .insert_draws_nothing => 0,
+                };
                 const h = sut.insert(v).?;
                 if (model.wasIssued(h)) return error.HandleReused;
                 try model.insert(a, h, v);
@@ -1241,6 +1276,8 @@ fn runT10(seeds: Seeds) !void {
     const correct: T10Cfg = .{ .mutant = false };
     var found: usize = 0;
     var minimal: usize = 0;
+    var shown: usize = 0;
+    var reproduced: usize = 0;
     var kind_ok: usize = 0;
     var accepts: usize = 0;
     var violations: usize = 0;
@@ -1291,6 +1328,11 @@ fn runT10(seeds: Seeds) !void {
                     const rep = try t10Replay(a, &mutant, f.shrunk_choices);
                     const is_min = std.mem.eql(u64, rep.keys, &expected_keys);
                     if (is_min) minimal += 1;
+                    // Display (D46, D47) on minimal seeds: the drawn texts
+                    // are std.fmt of the values the minimal steps draw.
+                    const shown_ok = is_min and try t10DisplayMatches(a, f.shrunk_draws);
+                    if (shown_ok) shown += 1;
+                    if (f.reproduced == true) reproduced += 1;
                     // Re-run the shrink from the confirmed failing sequence
                     // with the acceptance hook (as T9e), and with P5 off.
                     var src = zigprop.internal.Source.initReplay(a, f.choices, 100_000);
@@ -1307,9 +1349,10 @@ fn runT10(seeds: Seeds) !void {
                     const off_is_min = std.mem.eql(u64, off_rep.keys, &expected_keys);
                     if (off_is_min) off_min += 1;
                     off_evals += off.evaluations;
-                    out.print("{d:>4} | cases {d}, {s}, keys {any}{s}, evals {d}, {s} | hook: {d} acceptances, {d} violations, reproduces {} | P5 off: keys {any}{s}, evals {d} | B2: evals {d}\n", .{
+                    out.print("{d:>4} | cases {d}, {s}, keys {any}{s}, evals {d}, {s} | hook: {d} acceptances, {d} violations, reproduces {} | P5 off: keys {any}{s}, evals {d} | B2: evals {d} | drawn shown {}, reproduced {?}\n", .{
                         seed,        f.origin.random.attempt_index + 1, failureName(f.failure), rep.keys,     if (is_min) " (minimal)" else "",     f.shrink_evaluations, @tagName(f.shrink_outcome),
                         mon.accepts, mon.violations,                    same,                   off_rep.keys, if (off_is_min) " (minimal)" else "", off.evaluations,      b2_evals_seed,
+                        shown_ok,    f.reproduced,
                     });
                 },
                 else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
@@ -1328,9 +1371,188 @@ fn runT10(seeds: Seeds) !void {
         if (dbg_c.deinit() == .leak) ctl_leaks += 1;
     }
     const n = seeds.count();
-    out.print("T10: discovered {d}/{d}, minimal keys [3,0,0,1,0,0,0] {d}/{d}, failure = returned_error(HandleReused) {d}/{d}, kind kept on {d} acceptances with {d} violations, hook rerun reproduces {d}/{d}, leaking seeds {d}, control passed {d}/{d} (leaking seeds {d})\n", .{ found, n, minimal, found, kind_ok, found, accepts, violations, reproduces, found, leaks, ctl, n, ctl_leaks });
+    out.print("T10: discovered {d}/{d}, minimal keys [3,0,0,1,0,0,0] {d}/{d}, failure = returned_error(HandleReused) {d}/{d}, kind kept on {d} acceptances with {d} violations, hook rerun reproduces {d}/{d}, leaking seeds {d}, control passed {d}/{d} (leaking seeds {d}); drawn texts match on minimal seeds {d}/{d}, reproduced == true {d}/{d}\n", .{ found, n, minimal, found, kind_ok, found, accepts, violations, reproduces, found, leaks, ctl, n, ctl_leaks, shown, minimal, reproduced, found });
     out.print("T10 measurements: total evals {d}; P5 off: minimal {d}/{d}, total evals {d}; B1 discovered {d}/{d} (M0: 0/10); B2 discovered {d}/{d}, minimal {d}/{d}, total evals {d}, evals equal to M0 {d}/{d}; control discards (Limits) {d}\n", .{ evals, off_min, found, off_evals, b1_found, n, b2_found, n, b2_min, b2_found, b2_evals, b2_m0, n, ctl_discards });
-    out.print("T10 criterion (>=8 discovered AND >=8 minimal, HandleReused on every discovery AND 0 kind violations, 0 leaks, control 10/10; display and reproduced at M5): {s}\n", .{if (found >= 8 and minimal >= 8 and kind_ok == found and violations == 0 and leaks == 0 and ctl == n and ctl_leaks == 0) "MET" else "NOT MET"});
+    out.print("T10 criterion (>=8 discovered AND >=8 minimal, HandleReused on every discovery AND 0 kind violations, 0 leaks, control 10/10, drawn texts on every minimal seed, reproduced 10/10): {s}\n", .{if (found >= 8 and minimal >= 8 and kind_ok == found and violations == 0 and leaks == 0 and ctl == n and ctl_leaks == 0 and shown == minimal and reproduced == n) "MET" else "NOT MET"});
+}
+
+/// T10's display gate: the minimal steps are insert 0, remove (index 0),
+/// insert 0; the expected texts are built with std.fmt from those
+/// values, not fixed as literals.
+fn t10DisplayMatches(arena: std.mem.Allocator, drawn: []const zigprop.Report.Failed.Drawn) !bool {
+    const fmt = std.fmt.allocPrint;
+    const want = [_]struct { step: usize, text: []const u8 }{
+        .{ .step = 0, .text = try fmt(arena, "{any}", .{T10Op.insert}) },
+        .{ .step = 0, .text = try fmt(arena, "{any}", .{@as(u8, 0)}) },
+        .{ .step = 1, .text = try fmt(arena, "{any}", .{T10Op.remove}) },
+        .{ .step = 1, .text = try fmt(arena, "{d}", .{@as(u64, 0)}) },
+        .{ .step = 2, .text = try fmt(arena, "{any}", .{T10Op.insert}) },
+        .{ .step = 2, .text = try fmt(arena, "{any}", .{@as(u8, 0)}) },
+    };
+    if (drawn.len != want.len) return false;
+    for (drawn, want) |d, w| {
+        if (d.step != w.step or !std.mem.eql(u8, d.text, w.text)) return false;
+    }
+    return true;
+}
+
+fn summaryOf(r: zigprop.Report) zigprop.RegressionSummary {
+    return switch (r) {
+        .passed => |p| p.regressions,
+        .failed => |f| f.regressions,
+        .gave_up => |g| g.regressions,
+    };
+}
+
+fn onlyStale(r: zigprop.Report, reason: zigprop.StaleReason) bool {
+    const s = summaryOf(r);
+    return s.stale.len == 1 and s.stale[0].reason == reason and s.passed == 0;
+}
+
+// T12: regression persistence and stale classification for stateful
+// failures (design v0.4 §4 T12). Entries are T10's (and T11's for row
+// f), printed by regressionEntry and parsed back as T8 does.
+fn runT12(allocator: std.mem.Allocator, seeds: Seeds) !void {
+    const out = std.debug;
+    out.print("\n== T12 stateful regression entries (T10 entries printed and parsed back; row f uses T11's) ==\n", .{});
+    out.print("seed | entry choices | (a) mutant fails (b) correct passes (c) +bool discarded (d) no value unconsumed_suffix (e) reordered Op passes (known miss) (f) T11 max_len 16 fingerprint_mismatch\n", .{});
+    const mutant: T10Cfg = .{ .mutant = true };
+    const correct: T10Cfg = .{ .mutant = false };
+    const with_bool: T10Cfg = .{ .mutant = true, .variant = .insert_draws_bool };
+    const no_value: T10Cfg = .{ .mutant = true, .variant = .insert_draws_nothing };
+    const expected_entry = [_]u64{ 3, 0, 3, 0, 1, 0, 0, 3, 0 };
+    var minimal: usize = 0;
+    var rows: [6]usize = @splat(0);
+    var rows_other: [6]usize = @splat(0);
+    var other: usize = 0;
+    for (seeds.from..seeds.to + 1) |seed| {
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        var r = try zigprop.checkWith(allocator, void, *const T10Cfg, &mutant, null, propT10, .{ .seed = seed, .max_cases = 200 });
+        defer r.deinit();
+        var r11 = try zigprop.checkWith(allocator, void, u32, 1000, null, propT11, .{ .seed = seed, .max_cases = 200 });
+        defer r11.deinit();
+        if (r != .failed or r11 != .failed) {
+            out.print("{d:>4} | not discovered\n", .{seed});
+            continue;
+        }
+        const entry = try t8Entry(a, &r.failed);
+        const entries = [_]zigprop.Regression{entry};
+        const replay: zigprop.Config = .{ .seed = 1234, .max_cases = 1, .regressions = &entries, .regression_id = entry.id };
+        var ok: [6]bool = undefined;
+        {
+            var e = try zigprop.checkWith(allocator, void, *const T10Cfg, &mutant, null, propT10, replay);
+            defer e.deinit();
+            ok[0] = e == .failed and e.failed.origin == .regression and e.failed.origin.regression.stale == null and
+                e.failed.failure.eql(.{ .returned_error = error.HandleReused });
+        }
+        {
+            var e = try zigprop.checkWith(allocator, void, *const T10Cfg, &correct, null, propT10, replay);
+            defer e.deinit();
+            ok[1] = e == .passed and e.passed.regressions.passed == 1 and e.passed.regressions.unverified == 0 and e.passed.regressions.stale.len == 0;
+        }
+        {
+            var e = try zigprop.checkWith(allocator, void, *const T10Cfg, &with_bool, null, propT10, replay);
+            defer e.deinit();
+            ok[2] = onlyStale(e, .discarded);
+        }
+        {
+            var e = try zigprop.checkWith(allocator, void, *const T10Cfg, &no_value, null, propT10, replay);
+            defer e.deinit();
+            ok[3] = onlyStale(e, .unconsumed_suffix);
+        }
+        {
+            // The known miss: the replay passes and counts as passed.
+            var e = try zigprop.checkWith(allocator, void, *const T10Cfg, &mutant, null, propT10Reordered, replay);
+            defer e.deinit();
+            const s = summaryOf(e);
+            ok[4] = s.passed == 1 and s.stale.len == 0;
+        }
+        {
+            const entry11 = try t8Entry(a, &r11.failed);
+            const entries11 = [_]zigprop.Regression{entry11};
+            var e = try zigprop.checkWith(allocator, void, u32, 1000, null, propT11, .{ .seed = 1234, .max_cases = 1, .regressions = &entries11, .regression_id = entry11.id, .limits = .{ .max_len = 16 } });
+            defer e.deinit();
+            const s = summaryOf(e);
+            ok[5] = s.stale.len == 1 and s.stale[0].reason == .fingerprint_mismatch and s.stale[0].mismatch.max_len and !s.stale[0].mismatch.type_hash;
+        }
+        const is_min = std.mem.eql(u64, entry.choices, &expected_entry);
+        if (is_min) minimal += 1 else other += 1;
+        for (ok, 0..) |o, i| {
+            if (o) {
+                if (is_min) rows[i] += 1 else rows_other[i] += 1;
+            }
+        }
+        out.print("{d:>4} | {any}{s} | (a) {} (b) {} (c) {} (d) {} (e) {} (f) {}\n", .{ seed, entry.choices, if (is_min) " (minimal)" else "", ok[0], ok[1], ok[2], ok[3], ok[4], ok[5] });
+    }
+    const names = [_][]const u8{ "(a) same mutant -> failure from the entry, not stale, HandleReused", "(b) correct impl -> passed, stale 0", "(c) insert also draws a bool -> stale discarded", "(d) insert draws no value -> stale unconsumed_suffix", "(e) KNOWN MISS: Op declared { insert, get, remove } -> passed", "(f) T11 entry, max_len 32 -> 16 -> stale fingerprint_mismatch (max_len)" };
+    var all = minimal > 0;
+    for (names, rows, rows_other) |name, k, ko| {
+        if (k != minimal) all = false;
+        out.print("  {s}: {d}/{d}{s}", .{ name, k, minimal, if (std.mem.startsWith(u8, name, "(e)")) " (missed, as documented)" else "" });
+        if (other > 0) out.print("; non-minimal entries {d}/{d}", .{ ko, other });
+        out.print("\n", .{});
+    }
+    out.print("T12: entries with the predicted choices [3,0,3,0,1,0,0,3,0] {d}/{d}\n", .{ minimal, minimal + other });
+    out.print("T12 criterion (every row on every minimal entry; (e) is the documented miss): {s}\n", .{if (all) "MET" else "NOT MET"});
+}
+
+/// T13's properties: a counter in the context, advanced on every
+/// evaluation (the D48 contract violation).
+const T13Mode = enum { even_counter_fails, counter_unused, no_counter };
+const T13Ctx = struct { counter: u64 = 0, mode: T13Mode };
+
+fn propT13(ctx: *T13Ctx, case: *zigprop.Case, _: void) anyerror!bool {
+    if (ctx.mode != .no_counter) ctx.counter += 1;
+    const x = try case.generate(u8);
+    return switch (ctx.mode) {
+        .even_counter_fails => !(x >= 100 and ctx.counter % 2 == 0),
+        .counter_unused, .no_counter => x < 100,
+    };
+}
+
+// T13: probing determinism violations (design v0.4 §4 T13; measurement
+// only, not a gate).
+fn runT13(allocator: std.mem.Allocator, seeds: Seeds) !void {
+    const out = std.debug;
+    out.print("\n== T13 determinism probe (measurement; Ctx counter carried across evaluations, fails iff x >= 100 and the counter is even) ==\n", .{});
+    out.print("seed | violating: found, shrunk value, reproduced | control (i) counter unused: reproduced | control (ii) no counter: reproduced\n", .{});
+    var found: usize = 0;
+    var not_reproduced: usize = 0;
+    var ctl_i: usize = 0;
+    var ctl_ii: usize = 0;
+    for (seeds.from..seeds.to + 1) |seed| {
+        const cfg: zigprop.Config = .{ .seed = seed, .max_cases = 200 };
+        var c0: T13Ctx = .{ .mode = .even_counter_fails };
+        var r = try zigprop.checkWith(allocator, void, *T13Ctx, &c0, null, propT13, cfg);
+        defer r.deinit();
+        var c1: T13Ctx = .{ .mode = .counter_unused };
+        var r1 = try zigprop.checkWith(allocator, void, *T13Ctx, &c1, null, propT13, cfg);
+        defer r1.deinit();
+        var c2: T13Ctx = .{ .mode = .no_counter };
+        var r2 = try zigprop.checkWith(allocator, void, *T13Ctx, &c2, null, propT13, cfg);
+        defer r2.deinit();
+        if (r == .failed) {
+            found += 1;
+            if (r.failed.reproduced == false) not_reproduced += 1;
+        }
+        if (r1 == .failed and r1.failed.reproduced == true) ctl_i += 1;
+        if (r2 == .failed and r2.failed.reproduced == true) ctl_ii += 1;
+        // The reproduction check is the last evaluation, so the final
+        // counter is the counter it saw.
+        out.print("{d:>4} | {} {s} {?} (counter at the check {d}) | (i) {?} | (ii) {?}\n", .{
+            seed,
+            r == .failed,
+            if (r == .failed) r.failed.shrunk_draws[0].text else "-",
+            if (r == .failed) r.failed.reproduced else null,
+            c0.counter,
+            if (r1 == .failed) r1.failed.reproduced else null,
+            if (r2 == .failed) r2.failed.reproduced else null,
+        });
+    }
+    const n = seeds.count();
+    out.print("T13 (measurement): discovered {d}/{d}, reproduced == false {d}/{d} (predicted 5 +- 3); control (i) counter unused reproduced == true {d}/{d} (not detected, as designed); control (ii) no counter reproduced == true {d}/{d}\n", .{ found, n, not_reproduced, found, ctl_i, n, ctl_ii, n });
 }
 
 // ---------------------------------------------------------------------
@@ -1979,6 +2201,8 @@ pub fn main(init: std.process.Init) !void {
         try runT14(allocator, seeds);
         try runT11(allocator, seeds);
         try runT10(seeds);
+        try runT12(allocator, seeds);
+        try runT13(allocator, seeds);
         return;
     }
 

@@ -286,3 +286,61 @@ test "zon: tests/regressions.zon imports as a RegressionFile" {
     const file: zigprop.RegressionFile = @import("regressions.zon");
     try std.testing.expectEqual(@as(u32, 1), file.version);
 }
+
+// ---------------------------------------------------------------------
+// Properties that draw (design v0.4 D51)
+// ---------------------------------------------------------------------
+
+fn sumBelow1000(_: void, case: *zigprop.Case, _: void) anyerror!bool {
+    var s: u32 = 0;
+    for (try case.generate([]const u16)) |x| s += x;
+    return s < 1000;
+}
+
+fn noDrawFalse(_: void, _: *zigprop.Case, _: void) anyerror!bool {
+    return false;
+}
+
+test "fingerprint: property_draws keeps limits" {
+    const gpa = std.testing.allocator;
+    // T = void reaches no slice, so the normalized fingerprint would
+    // drop max_len; the property's own slice draw depends on it.
+    var r = try zigprop.checkWith(gpa, void, void, {}, null, sumBelow1000, .{});
+    defer r.deinit();
+    const got = r.failed.fingerprint;
+    try std.testing.expect(got.property_draws);
+    try std.testing.expectEqual(@as(u64, 32), got.max_len);
+    try std.testing.expectEqual(@as(u8, 8), got.max_depth);
+    const line = try r.failed.regressionEntry(gpa, "d");
+    defer gpa.free(line);
+    try std.testing.expect(std.mem.indexOf(u8, line, ".custom_generator = false, .property_draws = true }") != null);
+
+    const values = try gpa.alloc(u64, r.failed.shrunk_choices.len);
+    defer gpa.free(values);
+    for (r.failed.shrunk_choices, values) |c, *v| v.* = c.value;
+    const entries = [_]zigprop.Regression{.{ .id = "d", .gen_version = zigprop.generator_version, .fingerprint = got, .choices = values }};
+    // Same limits: the entry is compared in the same mode and fails again.
+    var same = try zigprop.checkWith(gpa, void, void, {}, null, sumBelow1000, .{ .regressions = &entries, .regression_id = "d", .max_cases = 1 });
+    defer same.deinit();
+    try std.testing.expect(same == .failed and same.failed.origin == .regression);
+    // Another max_len: stale (max_len), not replayed.
+    var other = try zigprop.checkWith(gpa, void, void, {}, null, sumBelow1000, .{ .regressions = &entries, .regression_id = "d", .max_cases = 1, .seed = 1, .limits = .{ .max_len = 16 } });
+    defer other.deinit();
+    const s = switch (other) {
+        .passed => |p| p.regressions.stale,
+        .failed => |f| f.regressions.stale,
+        .gave_up => |g| g.regressions.stale,
+    };
+    try std.testing.expectEqual(@as(usize, 1), s.len);
+    try std.testing.expectEqual(zigprop.StaleReason.fingerprint_mismatch, s[0].reason);
+    try std.testing.expect(s[0].mismatch.max_len and !s[0].mismatch.type_hash);
+
+    // A void property that draws nothing keeps the normalized form.
+    var plain = try zigprop.checkWith(gpa, void, void, {}, null, noDrawFalse, .{});
+    defer plain.deinit();
+    try std.testing.expect(!plain.failed.fingerprint.property_draws);
+    try std.testing.expectEqual(@as(u64, 0), plain.failed.fingerprint.max_len);
+    const plain_line = try plain.failed.regressionEntry(gpa, "p");
+    defer gpa.free(plain_line);
+    try std.testing.expect(std.mem.indexOf(u8, plain_line, "property_draws") == null);
+}
