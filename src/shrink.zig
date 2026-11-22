@@ -33,6 +33,7 @@ const GenContext = source.GenContext;
 const Limits = source.Limits;
 const Source = source.Source;
 const Span = source.Span;
+const DrawEntry = source.DrawEntry;
 
 pub const ShrinkOutcome = enum {
     fixed_point,
@@ -107,7 +108,8 @@ pub const Case = struct {
     /// the property returns afterwards is not a verdict.
     pub fn generate(self: *Case, comptime T: type) anyerror!T {
         const st = self.impl.?;
-        return gen.generate(T, st.gen) catch |err| {
+        const start = st.position();
+        const value = gen.generate(T, st.gen) catch |err| {
             if (err == error.InvalidGeneration) {
                 st.discard = true;
             } else {
@@ -118,6 +120,8 @@ pub const Case = struct {
             }
             return err;
         };
+        st.logDraw(start, .{ .regenerate = regenerator(T) });
+        return value;
     }
 
     /// Draws an index in `[0, n)` (D44; key = value). `n == 0` has
@@ -125,7 +129,10 @@ pub const Case = struct {
     pub fn index(self: *Case, n: u64) anyerror!u64 {
         const st = self.impl.?;
         if (n == 0) return st.discardAttempt();
-        return st.gen.index(n);
+        const start = st.position();
+        const k = st.gen.index(n);
+        st.logDraw(start, .{ .index = k });
+        return k;
     }
 
     /// Chooses one of the enabled tags of E (D44): the enabled tags in
@@ -140,17 +147,54 @@ pub const Case = struct {
             if (enabled.contains(@field(E, name))) count += 1;
         }
         if (count == 0) return st.discardAttempt();
+        const start = st.position();
         const k = st.gen.index(count);
         var i: u64 = 0;
         inline for (names) |name| {
             if (enabled.contains(@field(E, name))) {
-                if (i == k) return @field(E, name);
+                if (i == k) {
+                    st.logDraw(start, .{ .tag = name });
+                    return @field(E, name);
+                }
                 i += 1;
             }
         }
         unreachable;
     }
 };
+
+/// The type-erased regeneration function for T (design v0.4 D46): one
+/// per T, built at comptime.
+fn regenerator(comptime T: type) DrawEntry.Regenerate {
+    return &struct {
+        fn call(allocator: Allocator, limits: Limits, choices: []const Choice) anyerror![]u8 {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const aa = arena.allocator();
+            var src = Source.initReplay(aa, choices, limits.max_draws);
+            var state: source.GenState = undefined;
+            var gctx = source.genContextForTest(&state, &src, aa, limits);
+            return formatValue(allocator, try gen.generate(T, &gctx));
+        }
+    }.call;
+}
+
+fn hasCustomFormat(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum" => @hasDecl(T, "format"),
+        else => false,
+    };
+}
+
+/// Formats a regenerated value for display (design v0.3 D30, v0.4
+/// D46): `{f}` when its type declares `format`, `{any}` otherwise. The
+/// result is owned by `allocator`.
+pub fn formatValue(allocator: Allocator, value: anytype) ![]u8 {
+    if (comptime hasCustomFormat(@TypeOf(value))) {
+        return std.fmt.allocPrint(allocator, "{f}", .{value});
+    }
+    return std.fmt.allocPrint(allocator, "{any}", .{value});
+}
 
 /// Internal state behind `Case.impl` (design v0.4 D39): lives in
 /// `evaluateAttempt`'s frame for one evaluation.
@@ -165,6 +209,14 @@ pub const CaseState = struct {
     fn discardAttempt(self: *CaseState) error{InvalidGeneration} {
         self.discard = true;
         return error.InvalidGeneration;
+    }
+
+    fn position(self: *const CaseState) usize {
+        return self.gen.impl.src.recorded.items.len;
+    }
+
+    fn logDraw(self: *CaseState, start: usize, shown: DrawEntry.Shown) void {
+        self.gen.impl.src.recordDraw(.{ .start = start, .end = self.position(), .shown = shown });
     }
 };
 
@@ -247,6 +299,9 @@ pub const AttemptResult = union(enum) {
         /// Span annotations of the consumed sequence, result-owned
         /// (design v0.3 §3.2, D18). Metadata only.
         spans: []Span,
+        /// The property's draw log (design v0.4 D46), result-owned.
+        /// Empty when the property drew nothing. Metadata only.
+        draws: []DrawEntry,
         /// The failure kind (design v0.3 §5.4).
         failure: Failure,
     },
@@ -309,12 +364,16 @@ pub fn evaluateAttempt(
     const skips = try result_allocator.dupe(bool, src.recorded_skip.items);
     errdefer result_allocator.free(skips);
     const spans = try result_allocator.dupe(Span, src.recorded_spans.items);
-    return .{ .fail = .{ .choices = choices, .keys = keys, .skips = skips, .spans = spans, .failure = failure } };
+    errdefer result_allocator.free(spans);
+    const draws = try result_allocator.dupe(DrawEntry, src.recorded_draws.items);
+    return .{ .fail = .{ .choices = choices, .keys = keys, .skips = skips, .spans = spans, .draws = draws, .failure = failure } };
 }
 
 pub const ShrinkResult = struct {
     /// The shrunk consumed sequence, owned by the result allocator.
     choices: []Choice,
+    /// The final best's draw log (design v0.4 D46), result-owned.
+    draws: []DrawEntry,
     evaluations: usize,
     outcome: ShrinkOutcome,
 };
@@ -390,16 +449,16 @@ pub fn shrinkSpanned(
 ) !ShrinkResult {
     if (generator) |g| {
         const C = CustomProperty(T);
-        return shrinkWith(result_allocator, T, C.Ctx, .{ .property = property, .generator = g }, C.generator, C.property, .returned_false, limits, budget, initial, initial_keys, initial_skips, initial_spans, options);
+        return shrinkWith(result_allocator, T, C.Ctx, .{ .property = property, .generator = g }, C.generator, C.property, .returned_false, limits, budget, initial, initial_keys, initial_skips, initial_spans, &.{}, options);
     }
     const B = BoolProperty(T);
-    return shrinkWith(result_allocator, T, B.Ctx, property, null, B.property, .returned_false, limits, budget, initial, initial_keys, initial_skips, initial_spans, options);
+    return shrinkWith(result_allocator, T, B.Ctx, property, null, B.property, .returned_false, limits, budget, initial, initial_keys, initial_skips, initial_spans, &.{}, options);
 }
 
 /// The general shrinker (design §6, v0.3 §3): P(C) = "replaying C
 /// fails with a Failure equal to `failure`" (D27). The runner uses
-/// this form with default options; spans are metadata and never
-/// affect acceptance.
+/// this form with default options; spans and the draw log are metadata
+/// and never affect acceptance.
 pub fn shrinkWith(
     result_allocator: Allocator,
     comptime T: type,
@@ -414,6 +473,7 @@ pub fn shrinkWith(
     initial_keys: []const u64,
     initial_skips: []const bool,
     initial_spans: []const Span,
+    initial_draws: []const DrawEntry,
     options: ShrinkOptions,
 ) !ShrinkResult {
     const Inner = struct {
@@ -438,6 +498,9 @@ pub fn shrinkWith(
         /// Spans of the best sequence (design v0.3 §3.2); replaced
         /// together with it on every acceptance.
         best_spans: []Span,
+        /// The best sequence's draw log (design v0.4 D46); replaced
+        /// together with it, like the spans.
+        best_draws: []DrawEntry,
 
         const Fail = @FieldType(AttemptResult, "fail");
 
@@ -475,6 +538,7 @@ pub fn shrinkWith(
             self.allocator.free(f.keys);
             self.allocator.free(f.skips);
             self.allocator.free(f.spans);
+            self.allocator.free(f.draws);
         }
 
         fn replaceBest(self: *@This(), f: Fail) void {
@@ -482,10 +546,12 @@ pub fn shrinkWith(
             self.allocator.free(self.best_keys);
             self.allocator.free(self.best_skips);
             self.allocator.free(self.best_spans);
+            self.allocator.free(self.best_draws);
             self.best = f.choices;
             self.best_keys = f.keys;
             self.best_skips = f.skips;
             self.best_spans = f.spans;
+            self.best_draws = f.draws;
         }
 
         /// Tries one candidate value sequence; on acceptance the
@@ -836,6 +902,13 @@ pub fn shrinkWith(
         result_allocator.free(best_skips_copy);
         return err;
     };
+    const best_draws_copy = result_allocator.dupe(DrawEntry, initial_draws) catch |err| {
+        result_allocator.free(best_copy);
+        result_allocator.free(best_keys_copy);
+        result_allocator.free(best_skips_copy);
+        result_allocator.free(best_spans_copy);
+        return err;
+    };
     var inner = Inner{
         .allocator = result_allocator,
         .ctx = ctx,
@@ -849,6 +922,7 @@ pub fn shrinkWith(
         .best_keys = best_keys_copy,
         .best_skips = best_skips_copy,
         .best_spans = best_spans_copy,
+        .best_draws = best_draws_copy,
     };
     const outcome: ShrinkOutcome = blk: {
         while (true) {
@@ -857,6 +931,7 @@ pub fn shrinkWith(
                 result_allocator.free(inner.best_keys);
                 result_allocator.free(inner.best_skips);
                 result_allocator.free(inner.best_spans);
+                result_allocator.free(inner.best_draws);
                 return err;
             };
             // Budget exhaustion outranks fixed_point: a round only
@@ -867,13 +942,14 @@ pub fn shrinkWith(
         }
     };
     // Keys, skips and spans are shrink-internal (design §6, v2.1); the
-    // result carries only the choice sequence. The display is
-    // regenerated by the runner (design v0.3 §5.5).
+    // result carries the choice sequence and its draw log. The display
+    // is regenerated by the runner (design v0.3 §5.5).
     result_allocator.free(inner.best_keys);
     result_allocator.free(inner.best_skips);
     result_allocator.free(inner.best_spans);
     return .{
         .choices = inner.best,
+        .draws = inner.best_draws,
         .evaluations = inner.evaluations,
         .outcome = outcome,
     };

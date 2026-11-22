@@ -47,7 +47,7 @@
             .{ .file = "src/runner.zig", .func = "checkWith" },
             .{ .file = "src/shrink.zig", .func = "shrinkWith" },
         },
-        .hash = 0x6999a8ad70c8fd33,
+        .hash = 0xda439d1fb634d42b,
         .checked_against = "design v2 (§5-§7) + one v0.3 header note + P4 (v2.1) as ShrinkRatchet over a number nc: a finite rank abstraction of the runner/shrink protocol, not a refinement of the implementation; it does not check that tryRatchet counts or rewrites pairs as modelled. shrinkWith's hash covers every pass, since they are nested in its body. The hash was last moved by passChunks' u64-to-usize cast (32-bit build fix), which changes no value the model abstracts; the model was not re-checked for it.",
     },
 }

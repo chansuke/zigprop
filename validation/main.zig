@@ -1520,7 +1520,7 @@ pub fn main(init: std.process.Init) !void {
                     var gctx = zigprop.internal.genContextForTest(&st, &src, a, .{});
                     _ = try zigprop.generate(Value, &gctx);
                     var mon: KindMonitor = .{ .expected = expected_failure };
-                    const sr = try zigprop.internal.shrinkWith(a, Value, *const Codec, &rejecting, null, propT9, f.failure, .{}, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, .{ .on_accept = mon.hook() });
+                    const sr = try zigprop.internal.shrinkWith(a, Value, *const Codec, &rejecting, null, propT9, f.failure, .{}, 2000, src.recorded.items, src.recorded_keys.items, src.recorded_skip.items, src.recorded_spans.items, &.{}, .{ .on_accept = mon.hook() });
                     const same = std.mem.eql(u8, std.mem.sliceAsBytes(sr.choices), std.mem.sliceAsBytes(f.shrunk_choices));
                     t9e_violations += mon.violations;
                     t9e_accepts += mon.accepts;

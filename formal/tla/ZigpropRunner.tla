@@ -12,6 +12,8 @@
 (* `nc`, the number of pairs outside class 3, goes down. `nc` is a number *)
 (* here; the model does not check that the implementation counts pairs or *)
 (* rewrites them this way (see formal/tla/README.md).                     *)
+(* v0.4 assumption (not modelled): P(C) is a function of C also when the  *)
+(* property draws: the structure of its draws is deterministic (D48).     *)
 (*                                                                          *)
 (* Protocol rules modelled:                                               *)
 (*  - regressions replay first; a failing regression enters shrinking     *)

@@ -36,6 +36,32 @@ pub const Span = struct {
     };
 };
 
+/// One draw a property made through its Case (design v0.4 D46): the
+/// recorded positions `[start, end)` it consumed, the step it belongs
+/// to, and how to show it. Nothing is formatted while recording; the
+/// display is rebuilt from the choices afterwards.
+pub const DrawEntry = struct {
+    start: usize,
+    end: usize,
+    step: ?usize = null,
+    shown: Shown,
+
+    /// Regenerates the drawn value from its choices and formats it,
+    /// into memory owned by the given allocator.
+    pub const Regenerate = *const fn (Allocator, Limits, []const Choice) anyerror![]u8;
+
+    pub const Shown = union(enum) {
+        /// `Case.generate(T)`: rebuilt from the choices.
+        regenerate: Regenerate,
+        /// `Case.index`: the drawn index.
+        index: u64,
+        /// `Case.choose`: the chosen tag's name (static).
+        tag: []const u8,
+        /// `Case.steps`: a step boundary.
+        step_marker,
+    };
+};
+
 /// Generation limits shared by automatic and custom generators (design §3).
 pub const Limits = struct {
     /// Inclusive upper bound for slice lengths.
@@ -152,6 +178,9 @@ pub const Source = struct {
     /// Span annotations in pre-order of their start (design v0.3
     /// §3.2). Metadata only; see `Span`.
     recorded_spans: std.ArrayList(Span) = .empty,
+    /// Draws made inside the property, in draw order (design v0.4
+    /// D46). Metadata only, like spans.
+    recorded_draws: std.ArrayList(DrawEntry) = .empty,
     /// Replay cursor.
     pos: usize = 0,
     /// Set when a replay ran past the end of the recorded sequence.
@@ -188,6 +217,15 @@ pub const Source = struct {
         self.recorded_keys.deinit(self.allocator);
         self.recorded_skip.deinit(self.allocator);
         self.recorded_spans.deinit(self.allocator);
+        self.recorded_draws.deinit(self.allocator);
+    }
+
+    /// Appends one property draw to the log. A storage failure is kept
+    /// as the sticky error, like a recording failure.
+    pub fn recordDraw(self: *Source, entry: DrawEntry) void {
+        self.recorded_draws.append(self.allocator, entry) catch |err| {
+            if (self.sticky_error == null) self.sticky_error = err;
+        };
     }
 
     /// Sentinel returned by `beginSpan` when the span could not be

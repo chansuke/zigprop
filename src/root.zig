@@ -52,6 +52,7 @@ pub const internal = struct {
     pub const Source = source.Source;
     pub const GenState = source.GenState;
     pub const Span = source.Span;
+    pub const DrawEntry = source.DrawEntry;
     pub const deriveSeed = source.deriveSeed;
     pub const genContextForTest = source.genContextForTest;
     pub const shrink = shrink_mod.shrink;

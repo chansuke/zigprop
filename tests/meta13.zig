@@ -395,3 +395,64 @@ test "index: one draw keyed by its value; index(0) discards" {
         try testing.expect(r == .gave_up);
     }
 }
+
+// ---------------------------------------------------------------------
+// Draw log (D46, internal until v0.4 M5)
+// ---------------------------------------------------------------------
+
+fn propThreeDraws(_: void, case: *zigprop.Case, _: void) anyerror!bool {
+    const x = try case.generate(u8);
+    _ = try case.index(3);
+    _ = try case.choose(Op, .full);
+    return x < 10;
+}
+
+test "draw log: entries match the draws, are copied on failure and survive the arena" {
+    // Shrink from {u8 200 (class 0), index 2, choose 1 (b)}. The initial
+    // keys are larger than any candidate's and the initial log is
+    // empty, so a non-empty result log can only be an accepted
+    // evaluation's log, copied out of its arena (every candidate arena
+    // is gone when shrinkWith returns).
+    const initial = [_]Choice{ .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 200 }, .{ .bound = 3, .value = 2 }, .{ .bound = 3, .value = 1 } };
+    const keys = [_]u64{ 1000, 1000, 1000, 1000 };
+    const skips = [_]bool{ false, true, false, false };
+    const r = try zigprop.internal.shrinkWith(testing.allocator, void, void, {}, null, propThreeDraws, .returned_false, .{}, 2000, &initial, &keys, &skips, &.{}, &.{}, .{});
+    defer testing.allocator.free(r.choices);
+    defer testing.allocator.free(r.draws);
+    try testing.expectEqual(zigprop.ShrinkOutcome.fixed_point, r.outcome);
+    // The shrunk sequence: u8 10 (moved to class 3 by P4), index 0,
+    // choose 0 (a).
+    try testing.expectEqualSlices(Choice, &.{ .{ .bound = 4, .value = 3 }, .{ .bound = 256, .value = 10 }, .{ .bound = 3, .value = 0 }, .{ .bound = 3, .value = 0 } }, r.choices);
+    try testing.expectEqual(@as(usize, 3), r.draws.len);
+    const d = r.draws;
+    // One entry per draw, in order, covering exactly the positions each
+    // consumed.
+    try testing.expectEqual(@as(usize, 0), d[0].start);
+    try testing.expectEqual(@as(usize, 2), d[0].end);
+    try testing.expectEqual(@as(usize, 2), d[1].start);
+    try testing.expectEqual(@as(usize, 3), d[1].end);
+    try testing.expectEqual(@as(usize, 3), d[2].start);
+    try testing.expectEqual(@as(usize, 4), d[2].end);
+    for (d) |e| try testing.expectEqual(@as(?usize, null), e.step);
+    try testing.expectEqual(@as(u64, 0), d[1].shown.index);
+    try testing.expectEqualStrings("a", d[2].shown.tag);
+    // The generate entry regenerates its value from its own positions,
+    // into memory the caller owns.
+    const text = try d[0].shown.regenerate(testing.allocator, .{}, r.choices[d[0].start..d[0].end]);
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("10", text);
+}
+
+fn below10(x: u8) bool {
+    return x < 10;
+}
+
+test "draw log: a property that draws nothing logs nothing" {
+    const initial = [_]Choice{ .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 200 } };
+    const keys = [_]u64{ 200, 200 };
+    const skips = [_]bool{ false, true };
+    const r = try zigprop.internal.shrinkSpanned(testing.allocator, u8, null, below10, .{}, 2000, &initial, &keys, &skips, &.{}, .{});
+    defer testing.allocator.free(r.choices);
+    defer testing.allocator.free(r.draws);
+    try testing.expectEqual(@as(usize, 0), r.draws.len);
+}

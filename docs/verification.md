@@ -104,6 +104,10 @@ Which milestone moved which number (per the milestone commits): M2, M4a, M4b and
   `before_choices` and `after_choices` fields that the verification
   pipeline's M8 added to `AcceptEvent` (reported from `shrinkWith`) are
   not reflected on the formal side.
+- The TLA+ model does not reflect the v0.4 draw log: the property's
+  draws that `shrinkWith` now carries with the best sequence (design
+  v0.4 D46, M3) are not modelled, and the model assumes that a
+  property's draw structure is deterministic (D48).
 - Lean proves shortlex and the v2.1 measure (key shortlex, pairs
   outside class 3) well-founded over `Nat` (`shortlex_wf`,
   `measureLt_wf`), with no `sorry`. It does not prove that the

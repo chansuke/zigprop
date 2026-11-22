@@ -15,7 +15,7 @@
 //! `resize_fail_index` stays at its default `maxInt(usize)`, so a code
 //! path taken only when a resize or remap fails is not exercised.
 //!
-//! `zig build test` runs three cases (`oom_options.full = false`);
+//! `zig build test` runs four cases (`oom_options.full = false`);
 //! `zig build oom-full` runs every case below.
 
 const std = @import("std");
@@ -223,6 +223,18 @@ fn leafOnlyWith(_: *const Ctx, _: *zigprop.Case, t: Tree) anyerror!bool {
     return t.kids.len == 0;
 }
 
+/// Draws inside the property (design v0.4 §2): a slice, an index and a
+/// choice, each logged in the draw log, which every failing evaluation
+/// copies into the result allocator.
+fn drawsInProperty(ctx: *const Ctx, case: *zigprop.Case, _: void) anyerror!bool {
+    const xs = try case.generate([]const u8);
+    const k = try case.index(4);
+    var en: std.EnumSet(enum { a, b }) = .full;
+    if (k == 0) en.remove(.b);
+    _ = try case.choose(@TypeOf(en).Key, en);
+    return xs.len < ctx.limit;
+}
+
 const ctx3: Ctx = .{ .limit = 3 };
 const budget = 40;
 
@@ -272,6 +284,12 @@ fn runCheckWithSliceError(a: std.mem.Allocator) anyerror!Outcome {
     return Outcome.of(r);
 }
 
+fn runCheckWithDraws(a: std.mem.Allocator) anyerror!Outcome {
+    var r = try zigprop.checkWith(a, void, *const Ctx, &ctx3, null, drawsInProperty, .{ .seed = 3, .max_cases = 20, .shrink_budget = budget });
+    defer r.deinit();
+    return Outcome.of(r);
+}
+
 /// The OrError wrapper: only the error is observable, so the outcome
 /// is the variant it maps to (`error.PropertyFailed` for a failure).
 fn runCheckWithOrErrorTree(a: std.mem.Allocator) anyerror!Outcome {
@@ -305,6 +323,10 @@ test "oom: checkWith over a recursive type survives every allocation failure" {
 
 test "oom: a property error survives every allocation failure with the same error" {
     try expectOomSafe("checkWith []const u8 returning errors", runCheckWithSliceError);
+}
+
+test "oom: a property that draws survives every allocation failure" {
+    try expectOomSafe("checkWith void drawing in the property", runCheckWithDraws);
 }
 
 test "oom: outcomes that differ only in the property's error are not equal" {

@@ -341,17 +341,11 @@ fn printFailure(f: *const Report.Failed, config: Config) void {
 // The core
 // ---------------------------------------------------------------------
 
-fn hasCustomFormat(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .@"struct", .@"union", .@"enum" => @hasDecl(T, "format"),
-        else => false,
-    };
-}
-
 /// Regenerates the value of `choices` in a fresh arena and formats it
 /// (design v0.3 §5.5, D30): `{f}` when T declares `format`, `{any}`
-/// otherwise. The property is not called. The result is owned by
-/// `allocator`; nothing points into the arena.
+/// otherwise (`shrink.formatValue`, shared with the draw log). The
+/// property is not called. The result is owned by `allocator`; nothing
+/// points into the arena.
 fn renderValue(
     allocator: Allocator,
     comptime T: type,
@@ -368,10 +362,7 @@ fn renderValue(
     var state: source.GenState = undefined;
     var gctx = source.genContextForTest(&state, &src, aa, limits);
     const value = try (if (generator) |g| g(ctx, &gctx) else gen.generate(T, &gctx));
-    if (comptime hasCustomFormat(T)) {
-        return std.fmt.allocPrint(allocator, "{f}", .{value});
-    }
-    return std.fmt.allocPrint(allocator, "{any}", .{value});
+    return shrink_mod.formatValue(allocator, value);
 }
 
 fn makeFailed(
@@ -390,16 +381,20 @@ fn makeFailed(
     // Ownership moves step by step, so the error paths free explicitly
     // (an errdefer on a value that later moves into the report would
     // double-free).
-    const sr = shrink_mod.shrinkWith(allocator, T, Ctx, ctx, generator, property, fail.failure, config.limits, config.shrink_budget, fail.choices, fail.keys, fail.skips, fail.spans, .{}) catch |err| {
+    const sr = shrink_mod.shrinkWith(allocator, T, Ctx, ctx, generator, property, fail.failure, config.limits, config.shrink_budget, fail.choices, fail.keys, fail.skips, fail.spans, fail.draws, .{}) catch |err| {
         allocator.free(fail.choices);
         allocator.free(fail.keys);
         allocator.free(fail.skips);
         allocator.free(fail.spans);
+        allocator.free(fail.draws);
         return err;
     };
     allocator.free(fail.keys);
     allocator.free(fail.skips);
     allocator.free(fail.spans);
+    // The draw logs are internal until the report shows them (v0.4 M5).
+    allocator.free(fail.draws);
+    allocator.free(sr.draws);
     const original = renderValue(allocator, T, Ctx, ctx, generator, config.limits, fail.choices) catch |err| {
         allocator.free(fail.choices);
         allocator.free(sr.choices);
