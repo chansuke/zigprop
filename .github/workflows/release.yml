@@ -36,6 +36,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.17.1
+          use-cache: false
       - name: zig build verify-full
         run: zig build verify-full --summary all
       - name: build.zig.zon version equals the tag
@@ -162,6 +163,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.17.1
+          use-cache: false
       - name: Build tests/consumer/ against the tag tarball
         shell: bash
         working-directory: tests/consumer
