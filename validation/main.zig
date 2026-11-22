@@ -820,6 +820,97 @@ fn replayRuns(allocator: std.mem.Allocator, choices: []const zigprop.Choice) ![]
 }
 
 // ---------------------------------------------------------------------
+// v0.4 targets (design v0.4 §4). Their output goes after T8's, under
+// `== v0.4 targets ==`, so the T1-T9e prefix stays byte-identical
+// (D59). Gates are the values frozen after M0 (Amendment A-M0).
+// ---------------------------------------------------------------------
+
+// T14: tail-dependent verdict (P5 discrimination, design v0.4 §4 T14).
+const T14E = struct { a: u8, flag: bool };
+
+/// Sum of the `a` fields. The mutant mis-sums every a == 7 element,
+/// unless the last element's a is 0 (the trailing zero hides the bug).
+fn t14Sum(xs: []const T14E, mutant: bool) u64 {
+    const hidden = xs.len > 0 and xs[xs.len - 1].a == 0;
+    var s: u64 = 0;
+    for (xs) |x| s += if (mutant and !hidden and x.a == 7) 0 else x.a;
+    return s;
+}
+
+fn propT14Mutant(xs: []const T14E) bool {
+    return t14Sum(xs, true) == t14Sum(xs, false);
+}
+
+fn propT14Correct(xs: []const T14E) bool {
+    return t14Sum(xs, false) == t14Sum(xs, false);
+}
+
+/// The P5-off stop the design predicts for first-7 position f:
+/// keys [f+1, 0,0 (f times), 7, 0].
+fn t14P5OffShape(arena: std.mem.Allocator, f: usize) ![]u64 {
+    const keys = try arena.alloc(u64, 1 + 2 * (f + 1));
+    @memset(keys, 0);
+    keys[0] = f + 1;
+    keys[1 + 2 * f] = 7;
+    return keys;
+}
+
+fn runT14(allocator: std.mem.Allocator, seeds: Seeds) !void {
+    const out = std.debug;
+    out.print("\n== T14 tail-dependent verdict ([]const struct {{ a: u8, flag: bool }}; mutant: a 7 is mis-summed unless the last a is 0) ==\n", .{});
+    out.print("seed | P5 on: cases, f, shrunk keys, evals, outcome | P5 off (measurement): keys, evals, f-shape\n", .{});
+    var found: usize = 0;
+    var minimal: usize = 0;
+    var off_min: usize = 0;
+    var off_shape: usize = 0;
+    var ctl: usize = 0;
+    var evals: usize = 0;
+    var off_evals: usize = 0;
+    for (seeds.from..seeds.to + 1) |seed| {
+        var r = try zigprop.check(allocator, []const T14E, propT14Mutant, .{ .seed = seed, .max_cases = 200 });
+        defer r.deinit();
+        switch (r) {
+            .failed => |f| {
+                found += 1;
+                evals += f.shrink_evaluations;
+                var arena_state = std.heap.ArenaAllocator.init(allocator);
+                defer arena_state.deinit();
+                const a = arena_state.allocator();
+                const orig = try replayWithKeys([]const T14E, a, f.choices, .{});
+                var first7: usize = orig.value.len;
+                for (orig.value, 0..) |x, i| {
+                    if (x.a == 7) {
+                        first7 = i;
+                        break;
+                    }
+                }
+                const rep = try replayWithKeys([]const T14E, a, f.shrunk_choices, .{});
+                const is_min = std.mem.eql(u64, rep.keys, &.{ 1, 7, 0 });
+                if (is_min) minimal += 1;
+                const off = try shrinkMasked([]const T14E, a, propT14Mutant, .{}, f.choices, .{ .p5 = false });
+                const off_is_min = std.mem.eql(u64, off.keys, &.{ 1, 7, 0 });
+                if (off_is_min) off_min += 1;
+                const shape = std.mem.eql(u64, off.keys, try t14P5OffShape(a, first7));
+                if (shape) off_shape += 1;
+                off_evals += off.evaluations;
+                out.print("{d:>4} | cases {d}, f {d}, shrunk {any}{s}, evals {d}, {s} | P5 off: keys len {d}{s}, evals {d}, f-shape {s}\n", .{
+                    seed,         f.origin.random.attempt_index + 1,    first7,          rep.keys,                           if (is_min) " (minimal)" else "", f.shrink_evaluations, @tagName(f.shrink_outcome),
+                    off.keys.len, if (off_is_min) " (minimal)" else "", off.evaluations, if (shape) "match" else "no match",
+                });
+            },
+            else => out.print("{d:>4} | not discovered ({s})\n", .{ seed, @tagName(std.meta.activeTag(r)) }),
+        }
+        var c = try zigprop.check(allocator, []const T14E, propT14Correct, .{ .seed = seed, .max_cases = 200 });
+        defer c.deinit();
+        if (std.meta.activeTag(c) == .passed) ctl += 1;
+    }
+    const n = seeds.count();
+    out.print("T14: discovered {d}/{d}, minimal [1,7,0] {d}/{d}, control passed {d}/{d}\n", .{ found, n, minimal, found, ctl, n });
+    out.print("T14 measurements: total evals {d}; P5 off: minimal {d}/{d}, f-shape match {d}/{d}, total evals {d}; M0 (v0.3.1): P5 off minimal 0/10, f-shape 6/10\n", .{ evals, off_min, found, off_shape, found, off_evals });
+    out.print("T14 criterion (>=8 discovered AND >=8 minimal, control 10/10; P5-off <= 4/10 was the M0 condition): {s}\n", .{if (found >= 8 and minimal >= 8 and ctl == n) "MET" else "NOT MET"});
+}
+
+// ---------------------------------------------------------------------
 
 /// The inclusive seed range every target runs (`--seeds <from>..<to>`).
 /// The default, 0..9, is the range §8.3 registers the gates for; any
@@ -1459,6 +1550,10 @@ pub fn main(init: std.process.Init) !void {
     out.print("T8: entry sources failed on {d}/{d} seeds; rows met {s}\n", .{ t8_sources_found, n, if (t8_all) "all" else "NOT all" });
     if (!sweep) {
         out.print("T8 criterion (every row 10/10): {s}\n", .{if (t8_all) "MET" else "NOT MET"});
+        // v0.4 targets: default range only until Amendment A4 adds
+        // them to the sweep (design v0.4 D60).
+        out.print("\n== v0.4 targets ==\n", .{});
+        try runT14(allocator, seeds);
         return;
     }
 
