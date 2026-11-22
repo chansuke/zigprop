@@ -41,7 +41,9 @@ jobs:
       # pin-guard needs a base revision, so it is the one step outside `zig build verify-full`.
       - name: Pin guard (golden-pin diff against the PR base)
         if: github.event_name == 'pull_request'
-        run: zig build pin-guard -Dpin-base=origin/${{ github.base_ref }}
+        run: zig build pin-guard -Dpin-base="origin/$BASE_REF"
+        env:
+          BASE_REF: ${{ github.base_ref }}
       - name: Pin guard (golden-pin diff against the previous commit)
         if: github.event_name == 'push'
         run: zig build pin-guard -Dpin-base=HEAD~1
