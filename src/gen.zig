@@ -154,6 +154,8 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
         ctx.impl.depth -= 1;
     };
     switch (@typeInfo(T)) {
+        // No draw and no span (design v0.4 D49).
+        .void => return {},
         .bool => return ctx.impl.src.boolean(),
         .int => return generateInt(T, ctx),
         .float => return generateFloat(T, ctx),
@@ -218,7 +220,7 @@ fn generateNormal(comptime T: type, ctx: *GenContext, comptime is_recursive: boo
             return result;
         },
         else => @compileError("zigprop: unsupported type " ++ @typeName(T) ++
-            " (generates bool, integers of 1-64 bits, f16/f32/f64, enums, tagged unions, " ++
+            " (generates void, bool, integers of 1-64 bits, f16/f32/f64, enums, tagged unions, " ++
             "optionals, arrays, slices and structs; use checkCustom for anything else)"),
     }
 }

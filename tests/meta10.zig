@@ -126,6 +126,8 @@ const EnumExplicit = enum(u16) { a = 3, b = 7, c = 42 };
 const EnumNonExhaustive = enum(u8) { x = 1, y = 200, _ };
 const S3 = struct { a: u32, b: i16, c: bool };
 const U3 = union(enum) { a: u8, b: void, c: i32 };
+const SVoid = struct { x: void };
+const SVoidMixed = struct { a: bool, x: void, b: bool };
 
 // ---------------------------------------------------------------------
 // Tests
@@ -189,6 +191,14 @@ test "golden (R): nested slices" {
 test "golden (R): struct and union (void and non-void variants)" {
     try checkReplay(S3, S3, &replay_struct);
     try checkReplay(U3, U3, &replay_union);
+}
+
+test "golden (R): void replays with zero draws" {
+    // v0.4 M1 (design v0.4 D49): void, alone or as a struct field,
+    // consumes and records nothing (design v0.3 F6).
+    try checkReplay(void, void, &replay_void);
+    try checkReplay(SVoid, SVoid, &replay_struct_void);
+    try checkReplay(SVoidMixed, SVoidMixed, &replay_struct_void_mixed);
 }
 
 test "golden (S): integers, one table per width" {
@@ -454,6 +464,18 @@ const replay_union = [_]ReplayPin(U3){
     .{ .values = &.{1}, .value = .{ .b = {} }, .choices = &.{.{ .bound = 3, .value = 1 }}, .keys = &.{1}, .skips = &.{false}, .consumed = 1 },
     .{ .values = &.{ 2, 0, 5 }, .value = .{ .c = -3 }, .choices = &.{ .{ .bound = 3, .value = 2 }, .{ .bound = 4, .value = 0 }, .{ .bound = 256, .value = 5 } }, .keys = &.{ 2, 5, 5 }, .skips = &.{ false, false, true }, .consumed = 3 },
     .{ .values = &.{ 0, 3, 200 }, .value = .{ .a = 200 }, .choices = &.{ .{ .bound = 3, .value = 0 }, .{ .bound = 4, .value = 3 }, .{ .bound = 256, .value = 200 } }, .keys = &.{ 0, 200, 200 }, .skips = &.{ false, false, true }, .consumed = 3 },
+};
+
+const replay_void = [_]ReplayPin(void){
+    .{ .values = &.{}, .value = {}, .choices = &.{}, .keys = &.{}, .skips = &.{}, .consumed = 0 },
+};
+
+const replay_struct_void = [_]ReplayPin(SVoid){
+    .{ .values = &.{}, .value = .{ .x = {} }, .choices = &.{}, .keys = &.{}, .skips = &.{}, .consumed = 0 },
+};
+
+const replay_struct_void_mixed = [_]ReplayPin(SVoidMixed){
+    .{ .values = &.{ 1, 0 }, .value = .{ .a = true, .x = {}, .b = false }, .choices = &.{ .{ .bound = 2, .value = 1 }, .{ .bound = 2, .value = 0 } }, .keys = &.{ 1, 0 }, .skips = &.{ false, false }, .consumed = 2 },
 };
 
 const random_u1 = [_]RandomPin(u1){
