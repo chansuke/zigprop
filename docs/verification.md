@@ -9,7 +9,8 @@ tightened after an external gap review (Codex / GPT-6.1-Sol,
 2026-11-19); several claims were narrowed to what the evidence
 actually shows, and the TLA+ model was remodelled where it diverged
 from the design. Rows 24–33 and the v0.3 validation record cover
-design v0.3 (`docs/design-v0.3.md`, M1–M7).
+design v0.3 (`docs/design-v0.3.md`, M1–M7). Rows 34–38 and the v0.4
+validation record cover design v0.4 (`docs/design-v0.4.md`, M1–M5).
 
 | # | Property | Evidence, scoped to what it actually establishes |
 |---|---|---|
@@ -46,6 +47,11 @@ design v0.3 (`docs/design-v0.3.md`, M1–M7).
 | 31 | v0.3 T5/T5s (§8.2; gates: found ≥ 8/10 and minimal ≥ 8/10, control 10/10) and T5-F | T5 (u64 LEB128, the 4th byte of a 4-byte encoding ignored): found 10/10, minimal 2^21 = 2097152 10/10, control 10/10: **MET**. T5s (i64 zigzag, same mutant): found 10/10, minimal 2^20 = 1048576 10/10, control 10/10: **MET**. v0.2.1 (M0-e): found 0/10 on both, as predicted, so the discovery comes from the distribution change. Measurement only: 1780 evaluations and 10 P4 acceptances in total, for each of T5 and T5s. T5-F (no gate): 415/2000 f64 values with exponent in [−20, 20] and non-zero low 20 mantissa bits on v0.3, vs 8/2000 on v0.2.1 (scratch run at M6). Kind: gate; T5-F measured only |
 | 32 | v0.3 M7: cut scope (§1.3, D12, D13): `reaches`, one `admissible` function shared by the existence check and the cut, `cutRel`; at a cut only the channels reaching the cut type stop, others generate post-limit (∅, cap); a cut union draws `index(m)` among its admissible variants | `tests/meta9.zig` "cut: …" (5 tests): the all-zero replay of the cut form agrees with `cutExistsRel` on 17 types, with the admissible sets and reachability edges of the zoo; Tree2's non-recursive fields are generated at the cut; a cut Json draws its tag among 4 admissible variants (`.str` and empty `.list` both observed); an independent recursive type below a cut nests at most one level (Tree3/Other); custom generators calling `generate` stay bounded for max_depth 0–3 (the `depth ≥ n` invariant, H1). `tests/meta8.zig` cut tests rewritten for v2 (void and zero-length-array variants chosen by a tag draw; non-reaching fields generated). The m = 1 “no tag draw” path (`src/gen.zig`) is pinned by `tests/meta9.zig` "cut: a single admissible variant (m = 1) draws no tag", and m = 0 is pinned unreachable for the listed types by "cut: every union a cut of a listed type meets has an admissible variant (m = 0 unreachable)". T4 held (10/10, 10/10). meta8 compile step, measured at M8 (1-s resolution, from `zig build --summary all`): 3 s when compiled alone, with the std cache warm; 4 s and 7 s in two fresh-cache full builds, which compile all 15 test binaries in parallel. M0-a measured 2 s, sequentially, on v0.2.1 and on the prototype. Termination of cut-form generation and of the comptime unfolding are **argued only** (§1.3). Kind: pinned by tests; termination argued |
 | 33 | v0.3 M7: `generator_version = 2` (§7.1–7.3, D34): v1 entries are stale as `gen_version_mismatch` and are not replayed; no migration tool, no v1 switch | `tests/meta11.zig`: a v1-recorded entry that would fail if replayed is not replayed under version 2, and with `fail_on_stale` the wrapper returns `error.StaleRegression`; the version-1 ZON file's 3 entries are now all stale (before M7: 3 passed, 2 unverified). `tests/meta2.zig` "regressions: passing entries are counted, stale versions skipped" now uses a `gen_version = 1` entry. Printed entries carry `.gen_version = 2` (`tests/meta12.zig`, `tests/meta12_entry.zon`). The retired v1 recursive-cut pins are kept as comments in `tests/meta10_rec.zig`. Kind: pinned by tests |
+| 34 | v0.4 M1: `void` generates with no draw and no span (D49); `generator_version` stays 2 (D50) | `tests/meta10.zig` "golden (R): void replays with zero draws" (3 new (R) pins: `void`, `struct { x: void }`, a struct mixing `void` with two bools). pin-guard classified them as added and every existing pin as unchanged. Kind: pinned by tests |
+| 35 | v0.4 M2: draws inside the property (D39–D44): `Case.generate`/`index`/`choose` record into the attempt's own Source through the generation path; the post-property checks (sticky error, then `max_draws` or the discard flag, then exhaustion in the runner and regression phases) outrank the verdict; an element-budget overflow, `index(0)` or an empty `choose` set discards; a property's own `InvalidGeneration` is still a failure | `tests/meta13.zig`: "case: draws record into the attempt's Source", "case: a regression replay that runs past the end is stale discarded, not a verdict", "case: exceeding max_draws inside the property is a discard", "case: the post-property checks outrank the verdict", "case: an element-budget overflow inside the property is a discard, a property's own InvalidGeneration is a failure", "choose: always one draw, bound = enabled count; empty set discards", "index: one draw keyed by its value; index(0) discards", and two OOM tests. Each check and the D42 sticky-error line were removed once during M2 and the tests went red. T11 gate (2) (validation record below) shows an in-property draw recording exactly what the same draws in a custom generator record. A property that draws nothing is unchanged: the T1–T9e validation output is byte-identical to the v0.3.1 reference (v0.4 validation record). Kind: pinned by tests; gate |
+| 36 | v0.4 M3: the draw log (D46): each draw logs its positions and how to show it; a failing evaluation copies the log out of the arena, and the shrinker keeps it with the best sequence | `tests/meta13.zig` "draw log: entries match the draws, are copied on failure and survive the arena", "draw log: a property that draws nothing logs nothing"; `tests/oom.zig` "oom: a property that draws survives every allocation failure". `formal/manifest.zon` took `shrinkWith`'s new hash; the TLA+ model does not reflect the log (known gaps). Kind: pinned by tests |
+| 37 | v0.4 M4: `Case.steps` (D45): one length draw; each step is an existing `.element` span tied to it, so P5 and P6 delete steps as they delete slice elements; no new span kind and no new pass | `tests/meta13.zig` "steps: one length draw, one element span per step, an early return closes the open span", "steps: a finished loop closes its last step and draws after it belong to no step", "steps: running out of the element budget ends the loop and discards the attempt". T10 (validation record below). Kind: pinned by tests; gate |
+| 38 | v0.4 M5: report and compatibility (D47, D48, D51, D61): `Report.Failed.original_draws`/`shrunk_draws`/`reproduced` (defaulted), the `drawn:` section of the `*OrError` print, the reproduction check only when the shrunk sequence drew, `Fingerprint.property_draws` keeping every limit | `tests/meta12.zig` "drawn: the report owns the drawn values, grouped by step, and reproduces the failure", "drawn: the printed section groups a step's draws and marks the last step", "drawn: a property that draws nothing has no drawn values and no reproduction check", "drawn: the OrError wrapper prints a drawing property's failure"; `tests/meta11.zig` "fingerprint: property_draws keeps limits"; `tests/meta12_entry.zon` unchanged, so v0.3 entries print and round-trip as before. `tests/api_surface.zig` now also pins `Case`'s declarations and fields, `Report.Failed`'s and `Fingerprint`'s fields, and `checkWith`'s type name (a generic function's type equals no hand-written function type, so the name is compared). Adding a `Case` method and removing a `Failed` default were each tried once and turned it red. Kind: pinned by tests |
 
 ## v0.3 validation record (final M8 run, 2026-11-19)
 
@@ -68,6 +74,66 @@ design v0.3 (`docs/design-v0.3.md`, M1–M7).
 Measurement only (§8.3): evaluation counts and P4 acceptances (rows 27, 31, above); T5-F (row 31); T6/T7 ablations and v0.2.1 values (row 27); meta8 compile time (row 32). **Not measured:** T4's discard count (the harness does not print it) and the span bookkeeping overhead in the benchmarks.
 
 Which milestone moved which number (per the milestone commits): M2, M4a, M4b and M5 left T1–T4 unchanged (M4a's and M4b's validation output was byte-identical to the previous milestone's). M3 left T1 and T3 unchanged, added one evaluation per seed to T2 (one P1b candidate) and changed T4 to 141–182 evaluations. M6 moved the per-seed numbers of T3, T4, T6 and T7 (M6 commit message). M7's effect on per-seed numbers was not recorded, because the session that implemented it was lost before reporting. The T9e acceptance count went from 243 (M4b, unchanged at M5) to 245 at M6 or M7. No gate result fell below its gate at any milestone, according to the milestone commits and the director's re-run of M7.
+
+## v0.4 validation record (M5 tree, 2026-11-23)
+
+`zig build validation`, seeds 0–9, `max_cases = 200`,
+`shrink_budget = 2000`, default Limits. The T1–T9e output is
+byte-identical to the v0.3.1 reference (first 15162 bytes; compared
+at M1, M2, M5 and M6, while the M3 and M4 comparisons were lost with
+the session that ran them); the v0.4 targets print after it under
+`== v0.4 targets ==`. Gates were frozen after the v0.3.1 baselines
+were measured (design v0.4 Amendment A-M0).
+
+| Target | Gate | Result |
+|---|---|---|
+| T10 slot map, generation-checked handles (mutant: `remove` keeps the generation) | found ≥ 8, keys `[3,0,0,1,0,0,0]` ≥ 8, `returned_error(HandleReused)` on every discovery and every acceptance, `reproduced` 10/10, 0 leaks, drawn texts on minimal seeds, control 10/10 with 0 leaks | 10/10, 10/10, 10/10 with 0 kind violations in 105 acceptances, 10/10, 0, 10/10, 10/10 and 0: **MET** |
+| T11 interactive draws (`Width`, then `[]const u16` or `[]const u4`; fails iff sum ≥ 1000) | (1) found ≥ 8, keys `[0,1,1000]` ≥ 8; (2) shrunk choices and evaluations identical to the generator form 10/10; (3) drawn texts 10/10; (4) entry replays 10/10; (5) `reproduced` 10/10; control 10/10 | 10/10, 10/10; 10/10 (the generator form also equals the v0.3.1 reference on 10/10); 10/10; 10/10; 10/10; 10/10: **MET** |
+| T12 stateful regression entries (T10 entries; row (f) T11's) | rows (a)–(d), (f) on every minimal entry; (e) is the documented miss | entries `[3,0,3,0,1,0,0,3,0]` 10/10; (a) failure 10/10, (b) passed 10/10, (c) stale `discarded` 10/10, (d) stale `unconsumed_suffix` 10/10, (f) stale `fingerprint_mismatch` (`max_len`) 10/10; (e) reordered `Op` passes 10/10 (missed, as documented): **MET** |
+| T14 tail-dependent verdict (`[]const struct { a: u8, flag: bool }`) | found ≥ 8, keys `[1,7,0]` ≥ 8 with P5 on, control 10/10 (M0 condition P5-off ≤ 4/10: 0/10) | 10/10, 10/10, 10/10: **MET** |
+
+Measurement only, each with its pre-registered prediction:
+
+- T10 with P5 disabled: minimal 9/10 (predicted ≥ 8/10, held), 1143
+  evaluations against 1104 with P5. Seed 5 stopped at six steps.
+- T10-B1, the blind `[]const Cmd` encoding: found 0/10 (predicted 0/10).
+- T10-B2, the state-interpreted `[]const Cmd` encoding: found 10/10 and
+  minimal 10/10 (predicted ≥ 8/10), 1374 evaluations, each seed equal to
+  the v0.3.1 value.
+- T10 Limits discards: 0 (predicted 0).
+- T11 evaluations: 997, the same as the generator form on v0.3.1.
+- T13, the determinism probe (a context counter carried across
+  evaluations): found 10/10 and `reproduced == false` on 10/10 seeds.
+  **The prediction was 5 ± 3 and is wrong.** The counter was odd at
+  the check on all 10 seeds, so the parity is not the coin flip the
+  prediction assumed. The mechanism was not traced. Control (i), a
+  counter that is carried but unused, gives `reproduced == true` 10/10.
+  That is the documented non-detection. Control (ii), with no counter,
+  gives true 10/10.
+- T14 with P5 disabled: minimal 0/10 and the per-seed f-shape 6/10
+  (predicted 10/10; Amendment A-M0). Evaluations are 9070 against 652
+  with P5.
+
+What the targets do not separate:
+
+- T10 does not separate v0.4 from B2. Both find the bug on 10/10 seeds
+  and reach the same minimal keys.
+- T10 does not isolate P5: the early-returning property shrinks
+  without it on 9/10 seeds. T14 is the target that isolates P5.
+- No target backs claim (d) of design v0.4 §1, a real user's scenario.
+  The slot map is a bug the designer planted. What in-property draws
+  add over B2 is not finding power. They avoid the blind-encoding
+  trap (B1), give keys bounded by the state, show only what ran, and
+  allow draws whose number and type depend on state.
+
+Amendment A4 sweep, seeds 10–109, run once locally on the M6 tree
+(32.9 s wall): T10 minimal 97%, T11 minimal 100%, T11 agreement with
+the generator form 100%, each T12 row 97% (counted on minimal
+entries), T14 minimal with P5 on 100%, `sweep-below-threshold: none`.
+Printed without an issue condition: T10 P5-off minimal 89%, T10-B1
+found 0%, T10-B2 minimal 100%, T14 P5-off minimal 1%, T13
+`reproduced == false` 99%. The nightly job has not run these rows on
+Actions yet.
 
 ## Layers
 
@@ -190,3 +256,17 @@ Which milestone moved which number (per the milestone commits): M2, M4a, M4b and
 - v0.3: T7's gate, and on the current distribution both the T6 P6-off
   and the T7 P5-off ablations, do not separate their pass from the
   alternatives on the registered seeds (row 27).
+- v0.4: no user scenario exists. The validation targets cannot show
+  the shape a real user's system under test takes, whether a comptime
+  command interface would be needed (out of scope by D53), or what a
+  real failure report needs to show.
+- v0.4: a failure shows the drawn values per step, not the state of
+  the model or of the system under test at the failure (D57, out of
+  scope). Replaying the printed entry is the way to inspect that
+  state.
+- v0.4: a change of meaning that keeps the draw shape is not detected
+  (D52). T12 (e) pins this as a known miss: a reordered `Op` enum
+  makes a stored entry pass.
+- v0.4: the reproduction check is a single replay (D48). It misses a
+  violation that happens to give the same result at the check, as in
+  T13 control (i).

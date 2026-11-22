@@ -137,6 +137,113 @@ The wrappers print every stale entry. With
 Known miss: a change inside a custom generator that keeps the same
 draw shape is not detected.
 
+### Drawing inside the property (v0.4, unreleased)
+
+A property can draw more values while it runs, so a later draw can
+depend on what earlier steps did. The draws land in the same choice
+sequence as the generated value, so they shrink, replay and persist
+with it.
+
+- `case.generate(T)` draws a T through the same path as the value's
+  generation.
+- `case.index(n)` draws an index in `[0, n)`.
+- `case.choose(E, enabled)` picks one tag from a `std.EnumSet(E)`.
+  It always makes exactly one draw, keyed by the tag's position among
+  the enabled tags in declaration order.
+- `case.steps(max)` draws a step count once. `next()` then opens one
+  step at a time, and the shrinker deletes steps the same way it
+  deletes slice elements.
+- `index(0)`, an empty `choose` set and a draw past the element budget
+  discard the case. A property that returns `error.InvalidGeneration`
+  itself still fails.
+- `T = void` generates nothing, so a property that draws everything
+  itself takes `void` as its input.
+
+The recipe for a stateful test (model-based testing) needs no
+framework:
+
+1. Choose the operation with `choose`, from the operations the model
+   allows in its current state.
+2. Draw the payload for that operation against the model.
+3. Give each check its own error name.
+
+This is the slot-map target T10 as it runs in `validation/main.zig`.
+`SlotMap` (capacity 4, generation-checked handles) and `SlotModel`
+are defined there.
+
+```zig
+const Op = enum { insert, remove, get };
+
+fn slotMapProp(cfg: *const Cfg, case: *zigprop.Case, _: void) anyerror!bool {
+    const a = case.allocator;
+    var sut: SlotMap = .{ .mutant = cfg.mutant };
+    var model: SlotModel = .{};
+    var s = case.steps(16);
+    while (s.next()) {
+        var en: std.EnumSet(Op) = .empty;
+        if (model.live.items.len < SlotMap.cap) en.insert(.insert);
+        if (model.live.items.len > 0) en.insert(.remove);
+        if (model.issued.items.len > 0) en.insert(.get);
+        switch (try case.choose(Op, en)) {
+            .insert => {
+                const v = try case.generate(u8);
+                const h = sut.insert(v).?;
+                if (model.wasIssued(h)) return error.HandleReused;
+                try model.insert(a, h, v);
+            },
+            .remove => {
+                const h = model.live.items[try case.index(model.live.items.len)];
+                if (!sut.remove(h)) return error.RemoveMismatch;
+                model.remove(h);
+            },
+            .get => {
+                const h = model.issued.items[try case.index(model.issued.items.len)];
+                if (!std.meta.eql(sut.get(h), model.get(h))) return error.GetMismatch;
+            },
+        }
+    }
+    return true;
+}
+
+// try zigprop.checkWithOrError(gpa, void, *const Cfg, &cfg, null, slotMapProp, .{});
+```
+
+- **One error name per check.** Shrinking accepts only candidates that
+  fail with the same kind, so a separate name keeps the shrink on the
+  violation it found. With a bare `return false`, every check is the
+  same `returned_false`, and the shrink can slide from one violation
+  to another.
+- **Determinism contract.** The property must be a deterministic
+  function of its context, the values it draws and `case.allocator`.
+  Build the system under test and the model inside the property on
+  every evaluation (`case.allocator` is the evaluation's arena), and
+  carry no state across evaluations. A property that breaks this can
+  report a sequence that does not fail again. When the property drew
+  on the shrunk sequence, `Report.Failed.reproduced` records one
+  replay of it under regression conditions. A single replay catches
+  only some violations (validation target T13).
+- A failure prints a `drawn:` section after `shrunk:`. It shows one
+  line per step and marks the last step as where the property failed.
+  The values are rebuilt from the choices, so the property is not
+  called again. The state of the model and the system under test at
+  the failure is not shown. Replay the printed entry to inspect it.
+- A regression entry recorded from a drawing property carries
+  `.property_draws = true` in its fingerprint and keeps every limit.
+  A reordered `Op` enum with the same draw shape is a known miss: the
+  entry replays as a different operation sequence and passes.
+
+What this does and does not show:
+
+- No user scenario backs it yet. The slot map in this repository is a
+  bug the designer planted, not a report from a real user.
+- The v0.3 way of writing the same test, a `[]const Cmd` whose indices
+  are read modulo the live handles (B2 in design v0.4 §4), finds the
+  same bug just as often and shrinks to the same minimal key sequence
+  (T10's measurements). In-property draws do not find more bugs. They
+  avoid the trap of blind encodings, which never hit a live handle
+  (B1: 0/10). They also give keys bounded by the state, a display of
+  only what ran, and draws whose number and type depend on state.
+
 ## What changed in v0.3
 
 - **Recursive types: channel-relative cuts.** At the depth limit,
@@ -189,7 +296,7 @@ unchanged.
 ## Development
 
 Run the tests with `zig build test` (152 tests) and the validation
-targets with `zig build validation` (T1–T9). Formatting is checked
+targets with `zig build validation` (T1–T9e, then v0.4's T10–T14). Formatting is checked
 with
 `zig fmt --check src tests bench validation build.zig build.zig.zon`.
 

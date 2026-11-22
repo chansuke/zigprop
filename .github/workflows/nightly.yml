@@ -1,7 +1,7 @@
 name: Nightly
 
 # Measurements that are too slow or too noisy for every push: the
-# pre-registered validation sweep (design v0.3 Amendment A3), the full
+# pre-registered validation sweep (design v0.3 Amendments A3 and A4), the full
 # OOM brute force, zig master, and the compile-budget time.
 
 on:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   sweep:
-    name: validation sweep (seeds 10..109, Amendment A3)
+    name: validation sweep (seeds 10..109, Amendments A3 and A4)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
           line=$(grep '^sweep-below-threshold:' sweep.txt)
           if [ "$line" != "sweep-below-threshold: none" ]; then
-            body=$(printf '%s\n\nRun: %s/%s/actions/runs/%s (design v0.3 Amendment A3)\n' \
+            body=$(printf '%s\n\nRun: %s/%s/actions/runs/%s (design v0.3 Amendments A3 and A4)\n' \
               "$line" "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}")
             gh issue create --repo "${{ github.repository }}" \
               --title "Nightly validation sweep below 80% ($(date -u +%Y-%m-%d))" \

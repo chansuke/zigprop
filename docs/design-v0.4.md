@@ -458,7 +458,7 @@ fn slotMapProp(cfg: *const Cfg, case: *zigprop.Case, _: void) anyerror!bool {
     var model: Model = .init(case.allocator);           // live / issued / 値
     var s = case.steps(16);
     while (s.next()) {
-        var en = std.EnumSet(Op).initEmpty();
+        var en: std.EnumSet(Op) = .empty;
         if (model.live.items.len < 4) en.insert(.insert);
         if (model.live.items.len > 0) en.insert(.remove);
         if (model.issued.items.len > 0) en.insert(.get);
