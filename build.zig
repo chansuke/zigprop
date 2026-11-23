@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zigprop", .module = mod_fast }},
         }),
     });
-    const validation_step = b.step("validation", "Run the pre-registered validation targets T1-T9e");
+    const validation_step = b.step("validation", "Run the pre-registered validation targets T1-T14");
     const run_validation = b.addRunArtifact(validation_exe);
     // Amendment A3 sweep (design v0.3): `zig build validation -Dseeds=10..109`.
     if (b.option([]const u8, "seeds", "Validation seed range <from>..<to>, inclusive (default 0..9, the gated range)")) |range|

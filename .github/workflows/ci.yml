@@ -30,7 +30,7 @@ jobs:
         run: zig build test --summary all
       - name: Lint (tools/lint; core-is-pure keeps the core from printing, design v0.3 §4.8, D26)
         run: zig build lint
-      - name: Validation targets (T1-T9e)
+      - name: Validation targets (T1-T14)
         run: zig build validation
       - name: Compile budget (fresh cache, 120 s limit; time is a measurement)
         # shell: bash adds -o pipefail, so tee does not hide a failed compile-budget.
