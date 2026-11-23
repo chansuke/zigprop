@@ -3,15 +3,20 @@
 Property-based testing for Zig, built on integrated shrinking over
 recorded choice sequences.
 
-**Status: the latest release is v0.3.1.** v0.3.1 is a patch release: it
-fixes compilation on 32-bit targets (v0.3.0 did not compile there) and
-changes nothing in the public API. v0.3 settles the public API: the breaking
+**Status: the latest release is v0.4.0.** v0.4 adds interactive draws —
+`case.generate(T)`, `case.index(n)`, `case.choose(E, enabled)` and
+`case.steps(max)` — so a property can draw values that depend on what
+it has already done, and model-based stateful testing is documented as
+a recipe on top of them. The public API only grows: nothing from v0.3
+is changed or removed, and `generator_version` stays 2. v0.3 settles
+the public API: the breaking
 changes below land in one go, and no further breaks are planned.
 Every pre-registered validation target is met on all 10 registered
 seeds. That covers Phase 0's T1/T2
 ([docs/design-v2.md](docs/design-v2.md) §9), v0.2's T3/T4
-([docs/design-v0.2.md](docs/design-v0.2.md) §4) and v0.3's T5–T9
-([docs/design-v0.3.md](docs/design-v0.3.md) §8).
+([docs/design-v0.2.md](docs/design-v0.2.md) §4), v0.3's T5–T9
+([docs/design-v0.3.md](docs/design-v0.3.md) §8) and v0.4's T10–T14
+([docs/design-v0.4.md](docs/design-v0.4.md) §4).
 [docs/verification.md](docs/verification.md) maps the design
 claims it enumerates to their evidence (tests, validation targets,
 Lean proofs, TLA+ model checking, benchmarks) and lists the known
