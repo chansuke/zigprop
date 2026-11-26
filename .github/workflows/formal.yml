@@ -65,7 +65,7 @@ jobs:
         run: |
           curl -fsSL -o /tmp/tla2tools.jar \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-          echo "fdffef247f563ef6edbfd44958d2a82db79e7564e07cb673262d896353fa6713  /tmp/tla2tools.jar" \
+          echo "67f9575c3b9ef7a0787b1bded34812862ffe79d711298e5a75b1a77720b19928  /tmp/tla2tools.jar" \
             | sha256sum -c -
       - name: Run TLC (all configurations)
         working-directory: formal/tla
