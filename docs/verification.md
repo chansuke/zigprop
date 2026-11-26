@@ -19,7 +19,7 @@ validation record cover design v0.4 (`docs/design-v0.4.md`, M1–M5).
 | 3 | Replay fidelity | For one fixed bound sequence and draw count (300 draws), a normal replay reproduces the returned values and the re-recorded sequence (`tests/meta.zig`) |
 | 4 | Determinism | The same derived seed and bound sequence reproduce the same finite Source sequence; one example pair of attempts (seed 42, attempts 0/1) is shown to diverge on one bound sequence (`tests/meta.zig`) |
 | 5 | `deriveSeed` matches its specification | Outputs for 7 fixed inputs (including wrapping boundaries) are pinned by tests. Equivalence for all inputs is not proved; the pinned constants in `src/source.zig` are the spec |
-| 6 | Zigzag rank encoding (D1, MF7) | Over unbounded `Int`/`Nat`, the encoding is a bijection with the specified sign order, the exact magnitude formula `(r+1)/2`, and magnitude monotonicity in the rank (Lean `Zigzag.lean`). The connection to finite integer types (rank ranges, minimum values) is not proved |
+| 6 | Zigzag rank encoding (D1, MF7) | Over unbounded `Int`/`Nat`, the encoding is a bijection with the specified sign order, the exact magnitude formula `(r+1)/2`, and magnitude monotonicity in the rank (Lean `Zigzag.lean`). Lean proves, over the `Int` models of the signed rank maps in `formal/lean/ZigpropFormal/Bridge.lean`, that they equal `zigzagEncode`/`zigzagDecode` (`valueToRankI_eq`, `rankToValueI_eq`), that signed width-W values and ranks below 2^W correspond for 1 ≤ W ≤ 64, minimum values included (`zigzagEncode_lt_pow`, `zigzagDecode_range`), and that these ranks fit `u64` (`valueToRankI_fits_u64`). That `src/gen.zig` `rankToValue`/`valueToRank` implement these models, `@intCast` safety at the Zig level, `i128` semantics beyond the stated bound (`valueToRank_i128_bound`) and float ranks are argued and drift-monitored (`formal/manifest.zon`), not proved |
 | 7 | Shortlex acceptance cannot cycle (MF2, MF4) | Over `List Nat`, shortlex is a strict partial order and acceptance never grows the stored length (Lean `Shortlex.lean`). That the implementation applies it to re-recorded consumed values is milestone-3 test territory, not yet verified |
 | 8 | Counterexamples are stored only after confirmed failure (MF5) | In the finite abstract model (now including the regressions phase and infrastructure-error aborts), a stored rank always belongs to the fixed `Failing` set (TLA+ `BestAlwaysFails`). Evaluation handling and Report construction in the implementation are not yet verified |
 | 9 | `fixed_point` / `budget_exhausted` semantics (MF4) | The TLA+ model encodes pass rounds: `fixed_point` is reported only after a full round with no acceptance (`clean_finish`), `budget_exhausted` only at budget 0 before such a round completes. TLC checks this on 5 configurations (`ZigpropRunner`, `Empty`, `Zero`, `NoDiscard`, `Ratchet`); two more, `RatchetBad` and `RatchetTight`, are expected to fail (Layers) |
@@ -163,8 +163,13 @@ Actions yet.
   replay rule agrees with the `Nat` model for every bound and value
   (`normalizeU_toNat`); that `Source.draw` implements this model is
   argued and drift-monitored (`formal/manifest.zon`), not proved. For
-  zigzag, the bridge (rank ranges for finite types) is argued in the
-  design, not machine-checked.
+  zigzag, Lean proves, over the `Int` models of the signed rank maps
+  in `Bridge.lean`, that they equal `zigzagEncode`/`zigzagDecode`,
+  that signed width-W values and ranks below 2^W correspond for
+  1 ≤ W ≤ 64, and that these ranks fit `u64`. Unproved: that
+  `rankToValue`/`valueToRank` in `src/gen.zig` implement these models
+  (argued and drift-monitored), `@intCast` safety at the Zig level,
+  `i128` semantics beyond the stated bound, and float ranks.
 - The TLA+ rank abstraction is **not** a proven refinement of
   shortlex on choice sequences: TLC checks the protocol given the
   abstraction, not the sequence comparison, re-recording, or bounds

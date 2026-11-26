@@ -61,10 +61,24 @@ the same line through `Source.index` and `Source.range`, whose
 §6.2). The model does not capture the `.random` branch (`sample`), the
 `self.pos` bookkeeping and the exhaustion case, or the draw limit
 (`limit_exceeded`).
+
+## Signed rank map: `rankToValue` / `valueToRank` in `src/gen.zig`
+
+`valueToRankI` transcribes the signed branch of `valueToRank`
+(`value >= 0` gives `2 * value`, otherwise `-2 * value - 1`), and
+`rankToValueI` the signed branch of `rankToValue` (`rank % 2 == 0`
+gives `rank / 2`, otherwise `-(rank / 2) - 1`). Zig computes through
+`i128`; the models use `Int`, which is exact because for `W ≤ 64` the
+intermediates have magnitude at most `2^64`, far inside `i128`
+(`valueToRank_i128_bound`; `rankToValue`'s `-(rank / 2) - 1` with a
+`u64` rank is at least `-2^63 - 1`). `i128` wrap-around is outside the
+model. The unsigned branches, `@intCast` safety as Zig checks it, and
+float ranks (`floatRankToValue`) are not modelled.
 -/
 
 import ZigpropFormal.Shortlex
 import ZigpropFormal.Normalize
+import ZigpropFormal.Zigzag
 
 namespace ZigpropFormal
 
@@ -218,5 +232,96 @@ bound (`normalize_always_valid` through the bridge). -/
 theorem normalizeU_valid (b v : UInt64) : Valid b.toNat (normalizeU b v).toNat := by
   rw [normalizeU_toNat]
   exact normalize_always_valid b.toNat v.toNat
+
+/-- `2^W = 2 * 2^(W-1)` for `W ≥ 1`. -/
+theorem pow_eq_two_mul_pred {W : Nat} (hW : 1 ≤ W) : 2 ^ W = 2 * 2 ^ (W - 1) := by
+  have : W = (W - 1) + 1 := by omega
+  rw [this, Nat.pow_succ, Nat.add_sub_cancel, Nat.mul_comm]
+
+/-- `2^(W-1)` computed in `Int` is the cast of the `Nat` power. -/
+theorem int_pow_pred (W : Nat) : ((2 : Int) ^ (W - 1)) = ((2 ^ (W - 1) : Nat) : Int) := by
+  rw [Int.natCast_pow]
+  rfl
+
+/-- Rank bound: a signed width-`W` value has a rank below `2^W`. -/
+theorem zigzagEncode_lt_pow (W : Nat) (hW : 1 ≤ W ∧ W ≤ 64) (x : Int)
+    (hlo : -(2 ^ (W - 1) : Int) ≤ x) (hhi : x < 2 ^ (W - 1)) : zigzagEncode x < 2 ^ W := by
+  rw [pow_eq_two_mul_pred hW.1]
+  rw [int_pow_pred] at hlo hhi
+  generalize 2 ^ (W - 1) = p at hlo hhi ⊢
+  cases x with
+  | ofNat n => show 2 * n < 2 * p; rw [Int.ofNat_eq_natCast] at hhi; omega
+  | negSucc n => show 2 * n + 1 < 2 * p; rw [Int.negSucc_eq] at hlo; omega
+
+/-- Decode range: a rank below `2^W` decodes to a signed width-`W`
+value. -/
+theorem zigzagDecode_range (W : Nat) (hW : 1 ≤ W ∧ W ≤ 64) (r : Nat) (hr : r < 2 ^ W) :
+    -(2 ^ (W - 1) : Int) ≤ zigzagDecode r ∧ zigzagDecode r < 2 ^ (W - 1) := by
+  rw [pow_eq_two_mul_pred hW.1] at hr
+  rw [int_pow_pred]
+  generalize 2 ^ (W - 1) = p at hr ⊢
+  have h2 := Nat.div_add_mod r 2
+  unfold zigzagDecode
+  by_cases h : r % 2 = 0
+  · simp only [h, ite_true, Int.ofNat_eq_natCast]
+    exact ⟨by omega, by omega⟩
+  · simp only [h, ite_false, Int.negSucc_eq]
+    exact ⟨by omega, by omega⟩
+
+/-- Model of the signed branch of `valueToRank` in `src/gen.zig`, with
+the `i128` intermediate as `Int`. -/
+def valueToRankI (x : Int) : Int :=
+  if x ≥ 0 then 2 * x else -2 * x - 1
+
+/-- Model of the signed branch of `rankToValue` in `src/gen.zig`, with
+the `u64` rank as `Nat` and the `i128` intermediate as `Int`. -/
+def rankToValueI (r : Nat) : Int :=
+  if r % 2 = 0 then ((r / 2 : Nat) : Int) else -((r / 2 : Nat) : Int) - 1
+
+/-- The Zig encode model is `zigzagEncode`, on all of `Int`. -/
+theorem valueToRankI_eq (x : Int) : valueToRankI x = (zigzagEncode x : Int) := by
+  unfold valueToRankI
+  cases x with
+  | ofNat n =>
+    show (if (n : Int) ≥ 0 then 2 * (n : Int) else -2 * (n : Int) - 1) = ((2 * n : Nat) : Int)
+    split <;> omega
+  | negSucc n =>
+    show (if Int.negSucc n ≥ 0 then 2 * Int.negSucc n else -2 * Int.negSucc n - 1) =
+      ((2 * n + 1 : Nat) : Int)
+    rw [Int.negSucc_eq]
+    split <;> omega
+
+/-- The Zig decode model is `zigzagDecode`, on all of `Nat`. -/
+theorem rankToValueI_eq (r : Nat) : rankToValueI r = zigzagDecode r := by
+  unfold rankToValueI zigzagDecode
+  by_cases h : r % 2 = 0
+  · simp only [h, ite_true, Int.ofNat_eq_natCast]
+  · simp only [h, ite_false, Int.negSucc_eq]
+    omega
+
+/-- The rank of a signed width-`W` value, `W ≤ 64`, lies in `u64`'s
+range `[0, 2^64)`, so `valueToRank`'s `@intCast` to `u64` loses
+nothing. -/
+theorem valueToRankI_fits_u64 (W : Nat) (hW : 1 ≤ W ∧ W ≤ 64) (x : Int)
+    (hlo : -(2 ^ (W - 1) : Int) ≤ x) (hhi : x < 2 ^ (W - 1)) :
+    0 ≤ valueToRankI x ∧ valueToRankI x < 2 ^ 64 := by
+  rw [valueToRankI_eq]
+  have h := zigzagEncode_lt_pow W hW x hlo hhi
+  have hp : 2 ^ W ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) hW.2
+  have : (2 : Int) ^ 64 = ((2 ^ 64 : Nat) : Int) := by rw [Int.natCast_pow]; rfl
+  rw [this]
+  exact ⟨by omega, by omega⟩
+
+/-- The products in `valueToRank` stay inside `i128` for a signed
+width-`W` value, `W ≤ 64`: their magnitudes are at most `2^64`. -/
+theorem valueToRank_i128_bound (W : Nat) (hW : 1 ≤ W ∧ W ≤ 64) (x : Int)
+    (hlo : -(2 ^ (W - 1) : Int) ≤ x) (hhi : x < 2 ^ (W - 1)) :
+    -(2 ^ 127 : Int) ≤ 2 * x ∧ 2 * x < 2 ^ 127 ∧
+      -(2 ^ 127 : Int) ≤ -2 * x - 1 ∧ -2 * x - 1 < 2 ^ 127 := by
+  have hp : 2 ^ (W - 1) ≤ 2 ^ 63 := Nat.pow_le_pow_right (by decide) (by omega)
+  rw [int_pow_pred] at hlo hhi
+  have : (2 : Int) ^ 127 = ((2 ^ 127 : Nat) : Int) := by rw [Int.natCast_pow]; rfl
+  rw [this]
+  exact ⟨by omega, by omega, by omega, by omega⟩
 
 end ZigpropFormal

@@ -36,6 +36,14 @@ import ZigpropFormal
 #print axioms ZigpropFormal.keyLess_unskipped_iff_shortlex
 #print axioms ZigpropFormal.normalizeU_toNat
 #print axioms ZigpropFormal.normalizeU_valid
+#print axioms ZigpropFormal.pow_eq_two_mul_pred
+#print axioms ZigpropFormal.int_pow_pred
+#print axioms ZigpropFormal.zigzagEncode_lt_pow
+#print axioms ZigpropFormal.zigzagDecode_range
+#print axioms ZigpropFormal.valueToRankI_eq
+#print axioms ZigpropFormal.rankToValueI_eq
+#print axioms ZigpropFormal.valueToRankI_fits_u64
+#print axioms ZigpropFormal.valueToRank_i128_bound
 EOF
 trap 'rm -f AxiomsAudit.lean' EXIT
 

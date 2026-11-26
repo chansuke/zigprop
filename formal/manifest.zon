@@ -20,7 +20,7 @@
             .{ .file = "src/gen.zig", .func = "valueToRank" },
         },
         .hash = 0x6e7d3e0d952d1a55,
-        .checked_against = "design v2 (§4.1): zigzagEncode/zigzagDecode over Int/Nat model the signed-integer rank map in rankToValue (decode) and valueToRank (encode). The fit to finite integer types is not proved; float ranks (floatRankToValue) are a different encoding and not modelled; not re-checked against v0.3.",
+        .checked_against = "design v2 (§4.1): zigzagEncode/zigzagDecode over Int/Nat model the signed-integer rank map in rankToValue (decode) and valueToRank (encode). Bridge.lean proves, about Lean models, that the Zig-side signed rank maps equal zigzagEncode/zigzagDecode, that signed width-W values (W <= 64) and ranks below 2^W correspond, and that those ranks fit u64; that rankToValue/valueToRank implement these models, and @intCast safety at the Zig level, are argued, not proved. Float ranks (floatRankToValue) are a different encoding and not modelled; not re-checked against v0.3.",
     },
     .{
         .artifact = "formal/lean/ZigpropFormal/Shortlex.lean",
@@ -45,11 +45,13 @@
         .artifact = "formal/lean/ZigpropFormal/Bridge.lean",
         .impl = .{
             .{ .file = "src/source.zig", .func = "draw" },
+            .{ .file = "src/gen.zig", .func = "rankToValue" },
+            .{ .file = "src/gen.zig", .func = "valueToRank" },
             .{ .file = "src/shrink.zig", .func = "keyShortlexLess" },
             .{ .file = "src/shrink.zig", .func = "filteredLen" },
         },
-        .hash = 0x2ca1eff754b198d2,
-        .checked_against = "design v0.4 §6.2 (MB1): normalizeU is a hand transcription of draw's .replay line `if (bound == 0) raw else raw % bound` over UInt64; Lean proves normalizeU_toNat (it equals normalize on toNat images, for all b v) and normalizeU_valid (Valid via normalize_always_valid). The .random branch, pos bookkeeping and the draw limit are not modelled. (MB3): keyLess/keyLoop/filt are hand transcriptions of keyShortlexLess and filteredLen over UInt64 (each side a list of (key, skip) pairs). Lean proves keyLess_iff_shortlex (the model equals shortlex over the filtered, toNat-mapped key lists), keyLoop_eq_some (at equal filtered lengths the loop never reaches the unchecked b index) and keyLess_unskipped_iff_shortlex. The statement-by-statement fidelity argument is in the Bridge.lean header; it is a hand argument. That the Zig functions implement these models is not proved. filteredLen is a helper keyShortlexLess calls; it is listed so the hash covers it.",
+        .hash = 0x50fc6140a8faed88,
+        .checked_against = "design v0.4 §6.2: hand transcriptions over UInt64/Int, with claims proved about the Lean models only. draw: normalizeU transcribes the .replay line `if (bound == 0) raw else raw % bound`; normalizeU_toNat (equals normalize on toNat images, for all b v) and normalizeU_valid (Valid via normalize_always_valid); the .random branch, pos bookkeeping and the draw limit are not modelled. rankToValue/valueToRank: rankToValueI/valueToRankI transcribe the signed branches, with i128 as Int; rankToValueI_eq and valueToRankI_eq (equal zigzagDecode/zigzagEncode on all of Nat/Int), zigzagEncode_lt_pow and zigzagDecode_range (signed width-W values and ranks below 2^W correspond, 1 <= W <= 64), valueToRankI_fits_u64 (the rank is in [0, 2^64)) and valueToRank_i128_bound (the products stay inside i128); the unsigned branches, @intCast as Zig checks it, i128 wrap-around and float ranks are not modelled. keyShortlexLess/filteredLen: keyLess/keyLoop/filt, each side a list of (key, skip) pairs; keyLess_iff_shortlex (equals shortlex over the filtered, toNat-mapped key lists), keyLoop_eq_some (at equal filtered lengths the loop never reaches the unchecked b index) and keyLess_unskipped_iff_shortlex; the statement-by-statement fidelity argument is in the Bridge.lean header. filteredLen is a helper keyShortlexLess calls, listed so the hash covers it. That the Zig functions implement these models is argued by hand, not proved.",
     },
     .{
         .artifact = "formal/tla/ZigpropRunner.tla",
