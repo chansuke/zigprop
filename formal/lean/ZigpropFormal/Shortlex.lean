@@ -11,10 +11,12 @@ guarantees that acceptance can never cycle back to a previous state.
 
 `shortlex_wf` proves that shortlex is also well-founded on `List Nat`:
 no infinite sequence of strictly smaller sequences exists in this
-model. That is a statement about `Nat` values. It does not prove that
-the implementation compares its `u64` key sequences this way (the
-Nat/u64 bridge is not proved), so the implementation's shrink loop
-still stops because of the evaluation budget.
+model. That is a statement about `Nat` values. `Bridge.lean` proves
+that a `UInt64` model of the implementation's skip-filtered key
+comparison equals shortlex on the filtered, `toNat`-mapped keys
+(`keyLess_iff_shortlex`). That the Zig code is that model is argued,
+not proved, so the implementation's shrink loop still stops because
+of the evaluation budget.
 -/
 
 namespace ZigpropFormal

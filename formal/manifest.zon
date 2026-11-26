@@ -30,7 +30,7 @@
             .{ .file = "src/shrink.zig", .func = "tryRatchet" },
         },
         .hash = 0xdf3eeeff5e2b32e5,
-        .checked_against = "design v2 (pre-v2.1): shortlex as a strict order on List Nat values, and well-founded (shortlex_wf, lex_wf_of_length). The implementation compares skip-filtered u64 key sequences (v2.1, keyShortlexLess via tryAccept); that comparison and the u64/Nat bridge are not proved, and tryRatchet's lateral move is in Measure.lean, not here. Not re-checked against v0.3.",
+        .checked_against = "design v2 (pre-v2.1): shortlex as a strict order on List Nat values, and well-founded (shortlex_wf, lex_wf_of_length). The implementation compares skip-filtered u64 key sequences (v2.1, keyShortlexLess via tryAccept); Bridge.lean proves that a UInt64 model of that comparison equals shortlex over the filtered, toNat-mapped lists, while that keyShortlexLess implements the model is argued, not proved, and tryRatchet's lateral move is in Measure.lean, not here. Not re-checked against v0.3.",
     },
     .{
         .artifact = "formal/lean/ZigpropFormal/Measure.lean",
@@ -39,7 +39,16 @@
             .{ .file = "src/shrink.zig", .func = "tryRatchet" },
         },
         .hash = 0x61642f3ce381f566,
-        .checked_against = "design v2.1 measure (key shortlex, pairs outside class 3): measureLt_wf proves the order well-founded over List Nat × Nat. accept_decreases and ratchet_decreases only restate their hypotheses; that tryAccept and tryRatchet lower the measure is observed by the accept hook in tests/meta9.zig, not proved. The u64/Nat bridge is not proved.",
+        .checked_against = "design v2.1 measure (key shortlex, pairs outside class 3): measureLt_wf proves the order well-founded over List Nat × Nat. accept_decreases and ratchet_decreases only restate their hypotheses; that tryAccept and tryRatchet lower the measure is observed by the accept hook in tests/meta9.zig, not proved. Bridge.lean proves that a UInt64 model of keyShortlexLess equals key shortlex over Nat (keyLess_iff_shortlex); that the Zig function is that model is argued, not proved.",
+    },
+    .{
+        .artifact = "formal/lean/ZigpropFormal/Bridge.lean",
+        .impl = .{
+            .{ .file = "src/shrink.zig", .func = "keyShortlexLess" },
+            .{ .file = "src/shrink.zig", .func = "filteredLen" },
+        },
+        .hash = 0xaa585ca751b8eaa9,
+        .checked_against = "design v0.4 §6.2 (MB3): keyLess/keyLoop/filt are hand transcriptions of keyShortlexLess and filteredLen over UInt64 (each side a list of (key, skip) pairs). Lean proves keyLess_iff_shortlex (the model equals shortlex over the filtered, toNat-mapped key lists), keyLoop_eq_some (at equal filtered lengths the loop never reaches the unchecked b index) and keyLess_unskipped_iff_shortlex. The statement-by-statement fidelity argument is in the Bridge.lean header; it is a hand argument. That the Zig functions implement these models is not proved. filteredLen is a helper keyShortlexLess calls; it is listed so the hash covers it.",
     },
     .{
         .artifact = "formal/tla/ZigpropRunner.tla",

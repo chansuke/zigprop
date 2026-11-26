@@ -177,9 +177,16 @@ Actions yet.
 - Lean proves shortlex and the v2.1 measure (key shortlex, pairs
   outside class 3) well-founded over `Nat` (`shortlex_wf`,
   `measureLt_wf`), with no `sorry`. It does not prove that the
-  implementation's acceptances lower the measure, or that its `u64`
-  keys compare like the `Nat` model. Loop termination in the
-  implementation still rests on the evaluation budget, modelled in
+  implementation's acceptances lower the measure. Lean proves, over
+  the `UInt64`-typed model in `formal/lean/ZigpropFormal/Bridge.lean`,
+  that the skip-filtered key comparison equals shortlex over the
+  filtered, `toNat`-mapped key lists (`keyLess_iff_shortlex`), and
+  that at equal filtered lengths the loop never reaches the unchecked
+  `b` index (`keyLoop_eq_some`). That `src/shrink.zig`
+  `keyShortlexLess` implements this model is argued and
+  drift-monitored (`formal/manifest.zon`), not proved. Loop
+  termination in the implementation still rests on the evaluation
+  budget, modelled in
   TLA+ as a protocol property.
 - Random-mode draw correctness (uniformity of `intRangeLessThan`
   usage) and replay exhaustion interplay are only partially tested.
@@ -224,10 +231,12 @@ Actions yet.
   measure bound, and `ZigpropRunnerRatchetBad.cfg` is the expected
   violation without the decrease check. Still without a formal
   counterpart: that `tryAccept` and `tryRatchet` accept only
-  candidates meeting those hypotheses; the skip-filtered key
-  sequences that `keyShortlexLess` compares, and their `u64`/`Nat`
-  bridge; the rank annotation of integer pairs; and P4's rewrite
-  itself (which pairs it counts and how it rewrites them).
+  candidates meeting those hypotheses; that `keyShortlexLess` is the
+  `UInt64` comparison model of `Bridge.lean` (the model itself is
+  proved equal to shortlex over the filtered, `toNat`-mapped keys;
+  the correspondence is argued and drift-monitored); the rank
+  annotation of integer pairs; and P4's rewrite itself (which pairs it
+  counts and how it rewrites them).
 - `regressions.zon` is imported at comptime as a typed
   `RegressionFile` (v0.3 D31; import tests in meta11/meta12) and
   passed via `Config.regressions`. It is not parsed at runtime, and
