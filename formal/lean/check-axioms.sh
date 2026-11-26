@@ -34,6 +34,8 @@ import ZigpropFormal
 #print axioms ZigpropFormal.keyLess_iff_shortlex
 #print axioms ZigpropFormal.filt_unskipped
 #print axioms ZigpropFormal.keyLess_unskipped_iff_shortlex
+#print axioms ZigpropFormal.normalizeU_toNat
+#print axioms ZigpropFormal.normalizeU_valid
 EOF
 trap 'rm -f AxiomsAudit.lean' EXIT
 

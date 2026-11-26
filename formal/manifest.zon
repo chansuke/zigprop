@@ -11,7 +11,7 @@
         .artifact = "formal/lean/ZigpropFormal/Normalize.lean",
         .impl = .{.{ .file = "src/source.zig", .func = "draw" }},
         .hash = 0x206a3c2320106aa8,
-        .checked_against = "design v2 (§2, MF1): `normalize` over Nat models the replay rule in Source.draw's .replay branch (bound 0 verbatim, else raw % bound). The Lean header names Source.draw's .replay branch, the path every Source primitive goes through (`range` is declared twice in src/source.zig, so draw is also the unambiguous name here). The u64 bridge is not proved; not re-checked against v2.1 or v0.3.",
+        .checked_against = "design v2 (§2, MF1): `normalize` over Nat models the replay rule in Source.draw's .replay branch (bound 0 verbatim, else raw % bound). The Lean header names Source.draw's .replay branch, the path every Source primitive goes through (`range` is declared twice in src/source.zig, so draw is also the unambiguous name here). Bridge.lean proves that a UInt64 model of the replay line agrees with normalize on toNat images (normalizeU_toNat, so no u64 overflow or wrap changes the result); that draw implements that model is argued, not proved. Not re-checked against v2.1 or v0.3.",
     },
     .{
         .artifact = "formal/lean/ZigpropFormal/Zigzag.lean",
@@ -44,11 +44,12 @@
     .{
         .artifact = "formal/lean/ZigpropFormal/Bridge.lean",
         .impl = .{
+            .{ .file = "src/source.zig", .func = "draw" },
             .{ .file = "src/shrink.zig", .func = "keyShortlexLess" },
             .{ .file = "src/shrink.zig", .func = "filteredLen" },
         },
-        .hash = 0xaa585ca751b8eaa9,
-        .checked_against = "design v0.4 §6.2 (MB3): keyLess/keyLoop/filt are hand transcriptions of keyShortlexLess and filteredLen over UInt64 (each side a list of (key, skip) pairs). Lean proves keyLess_iff_shortlex (the model equals shortlex over the filtered, toNat-mapped key lists), keyLoop_eq_some (at equal filtered lengths the loop never reaches the unchecked b index) and keyLess_unskipped_iff_shortlex. The statement-by-statement fidelity argument is in the Bridge.lean header; it is a hand argument. That the Zig functions implement these models is not proved. filteredLen is a helper keyShortlexLess calls; it is listed so the hash covers it.",
+        .hash = 0x2ca1eff754b198d2,
+        .checked_against = "design v0.4 §6.2 (MB1): normalizeU is a hand transcription of draw's .replay line `if (bound == 0) raw else raw % bound` over UInt64; Lean proves normalizeU_toNat (it equals normalize on toNat images, for all b v) and normalizeU_valid (Valid via normalize_always_valid). The .random branch, pos bookkeeping and the draw limit are not modelled. (MB3): keyLess/keyLoop/filt are hand transcriptions of keyShortlexLess and filteredLen over UInt64 (each side a list of (key, skip) pairs). Lean proves keyLess_iff_shortlex (the model equals shortlex over the filtered, toNat-mapped key lists), keyLoop_eq_some (at equal filtered lengths the loop never reaches the unchecked b index) and keyLess_unskipped_iff_shortlex. The statement-by-statement fidelity argument is in the Bridge.lean header; it is a hand argument. That the Zig functions implement these models is not proved. filteredLen is a helper keyShortlexLess calls; it is listed so the hash covers it.",
     },
     .{
         .artifact = "formal/tla/ZigpropRunner.tla",

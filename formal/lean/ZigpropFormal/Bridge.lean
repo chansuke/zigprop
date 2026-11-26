@@ -50,9 +50,21 @@ exception is an allocation failure between the two appends, which sets
 The model does not capture Zig's integer index types, a bounds-check
 panic as such (it is the `none` result), or slices whose key and skip
 lengths differ. This mapping is argued by hand, not proved.
+
+## Replay normalization: `Source.draw` in `src/source.zig`
+
+`normalizeU` transcribes the `.replay` branch's last line,
+`if (bound == 0) raw else raw % bound`, over `u64`. The dynamic bounds
+of `Case.index` and `Case.choose` (`src/shrink.zig:133`, `:151`) reach
+the same line through `Source.index` and `Source.range`, whose
+`self.draw(bound, .uniform)` is at `src/source.zig:289` (design
+§6.2). The model does not capture the `.random` branch (`sample`), the
+`self.pos` bookkeeping and the exhaustion case, or the draw limit
+(`limit_exceeded`).
 -/
 
 import ZigpropFormal.Shortlex
+import ZigpropFormal.Normalize
 
 namespace ZigpropFormal
 
@@ -185,5 +197,26 @@ theorem keyLess_unskipped_iff_shortlex (xs ys : List UInt64) :
     keyLess (xs.map fun k => (k, false)) (ys.map fun k => (k, false)) = true ↔
       shortlex (xs.map UInt64.toNat) (ys.map UInt64.toNat) := by
   rw [keyLess_iff_shortlex, filt_unskipped, filt_unskipped]
+
+/-- Model of the replay rule in `Source.draw`, over `u64`. -/
+def normalizeU (b v : UInt64) : UInt64 :=
+  if b = 0 then v else v % b
+
+/-- The normalize bridge: the `UInt64` model agrees with `normalize`
+on the `toNat` images, for every bound and value. -/
+theorem normalizeU_toNat (b v : UInt64) :
+    (normalizeU b v).toNat = normalize b.toNat v.toNat := by
+  unfold normalizeU normalize
+  by_cases hb : b = 0
+  · subst hb
+    simp
+  · have hn : b.toNat ≠ 0 := fun h => hb (UInt64.toNat_inj.mp (h.trans UInt64.toNat_zero.symm))
+    simp [hb, hn, UInt64.toNat_mod]
+
+/-- Every `UInt64` replay-normalized value is a valid choice for its
+bound (`normalize_always_valid` through the bridge). -/
+theorem normalizeU_valid (b v : UInt64) : Valid b.toNat (normalizeU b v).toNat := by
+  rw [normalizeU_toNat]
+  exact normalize_always_valid b.toNat v.toNat
 
 end ZigpropFormal

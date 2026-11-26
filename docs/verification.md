@@ -14,7 +14,7 @@ validation record cover design v0.4 (`docs/design-v0.4.md`, M1–M5).
 
 | # | Property | Evidence, scoped to what it actually establishes |
 |---|---|---|
-| 1 | Recorded choices are valid | In the Lean `Nat` model, normalization always yields a valid choice. For Source's normal random draws, recorded validity is checked for the enumerated bounds {1,2,3,7,1000,2^63,0} over finite samples (`formal/lean/ZigpropFormal/Normalize.lean`, `tests/meta.zig`) |
+| 1 | Recorded choices are valid | In the Lean `Nat` model, normalization always yields a valid choice. Lean proves, over the `UInt64`-typed model of the replay line in `formal/lean/ZigpropFormal/Bridge.lean`, that it agrees with the `Nat` model for every bound and value (`normalizeU_toNat`) and so is always valid (`normalizeU_valid`); that `Source.draw` implements this model is argued and drift-monitored (`formal/manifest.zon`), not proved. For Source's normal random draws, recorded validity is checked for the enumerated bounds {1,2,3,7,1000,2^63,0} over finite samples (`formal/lean/ZigpropFormal/Normalize.lean`, `tests/meta.zig`) |
 | 2 | Sentinel and replay normalization | The sentinel is the identity; normalization is idempotent for all bounds (Lean `normalize_idempotent_all`). Zig replay checks one bound-change case and one sentinel case (`tests/meta.zig`) |
 | 3 | Replay fidelity | For one fixed bound sequence and draw count (300 draws), a normal replay reproduces the returned values and the re-recorded sequence (`tests/meta.zig`) |
 | 4 | Determinism | The same derived seed and bound sequence reproduce the same finite Source sequence; one example pair of attempts (seed 42, attempts 0/1) is shown to diverge on one bound sequence (`tests/meta.zig`) |
@@ -157,11 +157,14 @@ Actions yet.
 
 ## Known gaps (honest list)
 
-- The Lean model works over `Nat`/`Int`; the implementation works
-  over `u64` and finite integer types. The bridge (no overflow in
-  normalization; rank ranges for finite types) is argued in the
-  design, not machine-checked. This applies to zigzag as well as
-  normalization.
+- The Lean models work over `Nat`/`Int`; the implementation works
+  over `u64` and finite integer types. For normalization, Lean
+  proves, over the `UInt64`-typed model in `Bridge.lean`, that the
+  replay rule agrees with the `Nat` model for every bound and value
+  (`normalizeU_toNat`); that `Source.draw` implements this model is
+  argued and drift-monitored (`formal/manifest.zon`), not proved. For
+  zigzag, the bridge (rank ranges for finite types) is argued in the
+  design, not machine-checked.
 - The TLA+ rank abstraction is **not** a proven refinement of
   shortlex on choice sequences: TLC checks the protocol given the
   abstraction, not the sequence comparison, re-recording, or bounds
