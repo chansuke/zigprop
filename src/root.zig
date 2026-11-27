@@ -1,7 +1,7 @@
 //! zigprop — property-based testing for Zig.
 //!
-//! Designs: `docs/design-v2.md` (Phase 0), `docs/design-v0.2.md`,
-//! `docs/design-v0.3.md`. `forAll` is reserved and deliberately not
+//! The design notes cited as "design v…" are in the history at commit
+//! a49b1d0 (see README). `forAll` is reserved and deliberately not
 //! defined (v0.3 Q5).
 
 const source = @import("source.zig");

@@ -12,11 +12,11 @@ is changed or removed, and `generator_version` stays 2. v0.3 settles
 the public API: the breaking
 changes below land in one go, and no further breaks are planned.
 Every pre-registered validation target is met on all 10 registered
-seeds. That covers Phase 0's T1/T2
-([docs/design-v2.md](docs/design-v2.md) §9), v0.2's T3/T4
-([docs/design-v0.2.md](docs/design-v0.2.md) §4), v0.3's T5–T9
-([docs/design-v0.3.md](docs/design-v0.3.md) §8) and v0.4's T10–T14
-([docs/design-v0.4.md](docs/design-v0.4.md) §4).
+seeds: Phase 0's T1/T2, v0.2's T3/T4, v0.3's T5–T9 and v0.4's T10–T14.
+The design notes that define them, and that "design v0.3 §…" style
+references in the code point to, are no longer in the tree; read them
+from commit a49b1d0, for example
+`git show a49b1d0:docs/design-v0.3.md`.
 [docs/verification.md](docs/verification.md) maps the design
 claims it enumerates to their evidence (tests, validation targets,
 Lean proofs, TLA+ model checking, benchmarks) and lists the known
