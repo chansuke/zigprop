@@ -24,5 +24,5 @@ if command -v perf >/dev/null 2>&1; then
     fi
     echo "perf failed (permissions or unsupported events); falling back to a plain run"
 fi
-echo "running plain bench (see docs/profiling.md)"
+echo "running plain bench"
 "$BIN" "$@"

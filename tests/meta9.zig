@@ -1,5 +1,5 @@
 //! v0.3 meta tests: spans (M2), the new shrink passes (M3) and the
-//! cut scope (M7). Design: docs/design-v0.3.md §1.7, §3.9.
+//! cut scope (M7). Design: design v0.3 §1.7, §3.9.
 
 const std = @import("std");
 const zigprop = @import("zigprop");

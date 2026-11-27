@@ -9,8 +9,9 @@ tightened after an external gap review (Codex / GPT-6.1-Sol,
 2026-11-19); several claims were narrowed to what the evidence
 actually shows, and the TLA+ model was remodelled where it diverged
 from the design. Rows 24–33 and the v0.3 validation record cover
-design v0.3 (`docs/design-v0.3.md`, M1–M7). Rows 34–38 and the v0.4
-validation record cover design v0.4 (`docs/design-v0.4.md`, M1–M5).
+design v0.3 (M1–M7). Rows 34–38 and the v0.4 validation record cover
+design v0.4 (M1–M5). The design notes are in the history at commit
+a49b1d0 (see README).
 
 | # | Property | Evidence, scoped to what it actually establishes |
 |---|---|---|

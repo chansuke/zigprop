@@ -2,8 +2,8 @@
 //!
 //! Run: `zig build bench` (full) or `zig build bench -Dsmoke` (CI).
 //! The harness measures the Source layer, which every generated value
-//! pays for: one recorded draw per choice. See docs/profiling.md for
-//! perf/flamegraph workflows on top of this binary.
+//! pays for: one recorded draw per choice. scripts/profile.sh runs it
+//! under `perf stat` when perf is available.
 
 const std = @import("std");
 const zigprop = @import("zigprop");
